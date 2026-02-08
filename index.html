@@ -1,0 +1,801 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#2e7d32">
+    <title>IJTA Roll Call</title>
+    <link rel="manifest" href="manifest.json">
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f5f5f5;
+            color: #333;
+            min-height: 100vh;
+        }
+
+        .header {
+            background: #2e7d32;
+            color: white;
+            padding: 16px 20px;
+            text-align: center;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+
+        .header h1 {
+            font-size: 20px;
+            font-weight: 600;
+        }
+
+        .header .subtitle {
+            font-size: 12px;
+            opacity: 0.85;
+            margin-top: 2px;
+        }
+
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 16px;
+        }
+
+        /* Screen management */
+        .screen {
+            display: none;
+        }
+        .screen.active {
+            display: block;
+        }
+
+        /* Clinic Selection Screen */
+        .clinic-btn {
+            display: block;
+            width: 100%;
+            padding: 16px 20px;
+            margin-bottom: 10px;
+            background: white;
+            border: 2px solid #e0e0e0;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 500;
+            color: #333;
+            text-align: left;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+
+        .clinic-btn:active {
+            background: #e8f5e9;
+            border-color: #2e7d32;
+        }
+
+        .clinic-btn .clinic-icon {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 10px;
+        }
+
+        .clinic-btn[data-clinic*="Red"] .clinic-icon { background: #e53935; }
+        .clinic-btn[data-clinic*="Orange"] .clinic-icon { background: #fb8c00; }
+        .clinic-btn[data-clinic*="Green"] .clinic-icon { background: #43a047; }
+        .clinic-btn[data-clinic*="Middle"] .clinic-icon { background: #fdd835; }
+        .clinic-btn[data-clinic*="High"] .clinic-icon { background: #fdd835; }
+
+        /* Section headers */
+        .section-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin: 20px 0 10px 0;
+        }
+
+        .section-title:first-child {
+            margin-top: 4px;
+        }
+
+        /* Checklist items */
+        .checklist {
+            background: white;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+        }
+
+        .checklist-item {
+            display: flex;
+            align-items: center;
+            padding: 14px 16px;
+            border-bottom: 1px solid #f0f0f0;
+            cursor: pointer;
+            transition: background 0.1s;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+
+        .checklist-item:last-child {
+            border-bottom: none;
+        }
+
+        .checklist-item:active {
+            background: #f5f5f5;
+        }
+
+        .checklist-item.checked {
+            background: #e8f5e9;
+        }
+
+        .checkbox {
+            width: 24px;
+            height: 24px;
+            border: 2px solid #ccc;
+            border-radius: 6px;
+            margin-right: 12px;
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.15s;
+        }
+
+        .checklist-item.checked .checkbox {
+            background: #2e7d32;
+            border-color: #2e7d32;
+        }
+
+        .checkbox .checkmark {
+            display: none;
+            color: white;
+            font-size: 14px;
+            font-weight: bold;
+        }
+
+        .checklist-item.checked .checkbox .checkmark {
+            display: block;
+        }
+
+        .checklist-item .name {
+            font-size: 16px;
+            flex-grow: 1;
+        }
+
+        /* Select All */
+        .select-all-bar {
+            display: flex;
+            justify-content: flex-end;
+            margin-bottom: 6px;
+        }
+
+        .select-all-btn {
+            font-size: 13px;
+            color: #2e7d32;
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-weight: 600;
+            padding: 4px 0;
+        }
+
+        /* Back button */
+        .back-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            background: none;
+            border: none;
+            color: white;
+            font-size: 14px;
+            cursor: pointer;
+            position: absolute;
+            left: 16px;
+            top: 50%;
+            transform: translateY(-50%);
+        }
+
+        .header {
+            position: sticky;
+        }
+
+        .header-inner {
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* Submit button */
+        .submit-bar {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: white;
+            padding: 12px 16px;
+            padding-bottom: max(12px, env(safe-area-inset-bottom));
+            box-shadow: 0 -2px 8px rgba(0,0,0,0.1);
+            z-index: 100;
+        }
+
+        .submit-btn {
+            display: block;
+            width: 100%;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 16px;
+            background: #2e7d32;
+            color: white;
+            border: none;
+            border-radius: 12px;
+            font-size: 17px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+
+        .submit-btn:disabled {
+            background: #a5d6a7;
+            cursor: not-allowed;
+        }
+
+        .submit-btn:active:not(:disabled) {
+            background: #1b5e20;
+        }
+
+        /* Counter badge */
+        .counter {
+            font-size: 13px;
+            color: #666;
+            font-weight: normal;
+        }
+
+        /* Loading state */
+        .loading {
+            text-align: center;
+            padding: 60px 20px;
+            color: #999;
+        }
+
+        .loading .spinner {
+            display: inline-block;
+            width: 32px;
+            height: 32px;
+            border: 3px solid #e0e0e0;
+            border-top-color: #2e7d32;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin-bottom: 12px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Success overlay */
+        .overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.5);
+            z-index: 200;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .overlay.active {
+            display: flex;
+        }
+
+        .overlay-content {
+            background: white;
+            border-radius: 16px;
+            padding: 32px 24px;
+            text-align: center;
+            max-width: 320px;
+            margin: 20px;
+        }
+
+        .overlay-content .success-icon {
+            font-size: 48px;
+            margin-bottom: 12px;
+        }
+
+        .overlay-content h2 {
+            font-size: 20px;
+            margin-bottom: 8px;
+        }
+
+        .overlay-content p {
+            color: #666;
+            font-size: 14px;
+            margin-bottom: 20px;
+        }
+
+        .overlay-content button {
+            padding: 12px 32px;
+            background: #2e7d32;
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        /* Error state */
+        .error-msg {
+            background: #ffebee;
+            color: #c62828;
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin-bottom: 12px;
+            font-size: 14px;
+            display: none;
+        }
+
+        .error-msg.visible {
+            display: block;
+        }
+
+        /* Bottom padding for fixed submit bar */
+        .roll-screen-content {
+            padding-bottom: 80px;
+        }
+
+        /* Player count summary */
+        .summary-line {
+            font-size: 13px;
+            color: #888;
+            margin-top: 6px;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Clinic Selection Screen -->
+    <div id="clinic-screen" class="screen active">
+        <div class="header">
+            <div class="header-inner">
+                <div>
+                    <h1>IJTA Roll Call</h1>
+                    <div class="subtitle">Select a Clinic</div>
+                </div>
+            </div>
+        </div>
+        <div class="container">
+            <div id="clinic-list">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <div>Loading clinics...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Roll Taking Screen -->
+    <div id="roll-screen" class="screen">
+        <div class="header">
+            <div class="header-inner">
+                <button class="back-btn" onclick="showClinicScreen()">&#8592; Back</button>
+                <div>
+                    <h1 id="selected-clinic-name">Clinic Name</h1>
+                    <div class="subtitle" id="roll-date"></div>
+                </div>
+            </div>
+        </div>
+        <div class="container roll-screen-content">
+            <div id="error-message" class="error-msg"></div>
+
+            <div class="section-title">Coaches</div>
+            <div id="coaches-list" class="checklist"></div>
+
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <div class="section-title">Players <span id="player-counter" class="counter"></span></div>
+                <div class="select-all-bar">
+                    <button class="select-all-btn" onclick="toggleSelectAllPlayers()">Select All</button>
+                </div>
+            </div>
+            <div id="players-list" class="checklist"></div>
+        </div>
+        <div class="submit-bar">
+            <button class="submit-btn" id="submit-btn" onclick="submitRoll()">Submit Attendance</button>
+        </div>
+    </div>
+
+    <!-- Success Overlay -->
+    <div id="success-overlay" class="overlay">
+        <div class="overlay-content">
+            <div class="success-icon">&#10003;</div>
+            <h2>Submitted!</h2>
+            <p id="success-message">Attendance has been recorded.</p>
+            <button onclick="dismissSuccess()">Done</button>
+        </div>
+    </div>
+
+    <script>
+        // ==================== CONFIGURATION ====================
+        const ROSTER_SHEET_ID = '1DszkseXqMekH_erFHVEVELcKRI6UgPLexSZ9YtLYqBc';
+        const ROSTER_SHEET_NAME = 'Form Responses 1';
+
+        // Google Apps Script Web App URL
+        let APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbw1ucCGAN3UkT3bOxysmNj5-f0KfJLKFeZ-TTbPRygekeK5l1aSjF_IyuT2QcmjPqfL/exec';
+
+        const COACHES = [
+            'Joey Francis',
+            'Becca Mathis',
+            'Steve Prokop',
+            'J.C. Freeman',
+            'Matt Kendrick',
+            'John Lacy',
+            'Caleb Mathis',
+            'Lake Blackiston',
+            'Ellis Zapalowski'
+        ];
+
+        const CLINICS = [
+            'Red Ball (Ages 8 and Under)',
+            'Orange Ball (Ages 10 and Under)',
+            'Green Ball (Ages 12 and Under)',
+            'Middle School Yellow Ball Clinic (Ages 12-14)',
+            'High School Yellow Ball Clinic (Ages 14 and Over)'
+        ];
+
+        // Column indices for child data (0-based) in the CSV
+        // Child 1: Name=5, Clinic=7
+        // Child 2: Name=12, Clinic=14
+        // Child 3: Name=18, Clinic=20
+        // Child 4: Name=24, Clinic=26
+        const CHILD_COLUMNS = [
+            { name: 5, clinic: 7 },
+            { name: 12, clinic: 14 },
+            { name: 18, clinic: 20 },
+            { name: 24, clinic: 26 }
+        ];
+
+        // ==================== STATE ====================
+        let rosterData = {};  // { clinicName: [playerNames] }
+        let selectedClinic = '';
+        let allPlayersSelected = false;
+
+        // ==================== INITIALIZATION ====================
+        document.addEventListener('DOMContentLoaded', () => {
+            loadRoster();
+            checkAppsScriptUrl();
+        });
+
+        function checkAppsScriptUrl() {
+            if (!APPS_SCRIPT_URL) {
+                APPS_SCRIPT_URL = localStorage.getItem('ijta_apps_script_url') || '';
+            }
+        }
+
+        // ==================== ROSTER LOADING ====================
+        async function loadRoster() {
+            try {
+                const url = `https://docs.google.com/spreadsheets/d/${ROSTER_SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(ROSTER_SHEET_NAME)}`;
+                const response = await fetch(url);
+                if (!response.ok) throw new Error('Failed to fetch roster');
+                const csvText = await response.text();
+                parseRoster(csvText);
+                renderClinicList();
+            } catch (error) {
+                console.error('Error loading roster:', error);
+                document.getElementById('clinic-list').innerHTML =
+                    '<div class="error-msg visible">Failed to load roster. Please check your internet connection and try again.</div>';
+            }
+        }
+
+        function parseCSVRow(row) {
+            const result = [];
+            let current = '';
+            let inQuotes = false;
+
+            for (let i = 0; i < row.length; i++) {
+                const char = row[i];
+                if (inQuotes) {
+                    if (char === '"') {
+                        if (i + 1 < row.length && row[i + 1] === '"') {
+                            current += '"';
+                            i++;
+                        } else {
+                            inQuotes = false;
+                        }
+                    } else {
+                        current += char;
+                    }
+                } else {
+                    if (char === '"') {
+                        inQuotes = true;
+                    } else if (char === ',') {
+                        result.push(current.trim());
+                        current = '';
+                    } else {
+                        current += char;
+                    }
+                }
+            }
+            result.push(current.trim());
+            return result;
+        }
+
+        function parseRoster(csvText) {
+            rosterData = {};
+            CLINICS.forEach(c => rosterData[c] = []);
+
+            const lines = csvText.split('\n').filter(line => line.trim());
+            // Skip header row
+            for (let i = 1; i < lines.length; i++) {
+                const cols = parseCSVRow(lines[i]);
+
+                for (const child of CHILD_COLUMNS) {
+                    const name = cols[child.name] || '';
+                    const clinicField = cols[child.clinic] || '';
+
+                    if (!name || !clinicField) continue;
+
+                    // A child can be signed up for multiple clinics (comma-separated)
+                    const childClinics = clinicField.split(',').map(c => c.trim());
+
+                    for (const clinicName of childClinics) {
+                        // Match to our known clinics
+                        const matched = CLINICS.find(c =>
+                            c.toLowerCase() === clinicName.toLowerCase() ||
+                            clinicName.toLowerCase().includes(c.toLowerCase()) ||
+                            c.toLowerCase().includes(clinicName.toLowerCase())
+                        );
+
+                        if (matched) {
+                            const formattedName = formatName(name);
+                            if (!rosterData[matched].includes(formattedName)) {
+                                rosterData[matched].push(formattedName);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Sort players alphabetically by last name (already in "Last, First" format)
+            for (const clinic of CLINICS) {
+                rosterData[clinic].sort((a, b) => a.localeCompare(b));
+            }
+        }
+
+        function formatName(fullName) {
+            const parts = fullName.trim().split(/\s+/);
+            if (parts.length === 1) return parts[0];
+            const lastName = parts[parts.length - 1];
+            const firstName = parts.slice(0, -1).join(' ');
+            return `${lastName}, ${firstName}`;
+        }
+
+        // ==================== CLINIC SELECTION ====================
+        function renderClinicList() {
+            const container = document.getElementById('clinic-list');
+            container.innerHTML = '';
+
+            CLINICS.forEach(clinic => {
+                const count = rosterData[clinic] ? rosterData[clinic].length : 0;
+                const btn = document.createElement('button');
+                btn.className = 'clinic-btn';
+                btn.setAttribute('data-clinic', clinic);
+                btn.innerHTML = `
+                    <span class="clinic-icon"></span>
+                    ${clinic}
+                    <span class="counter" style="float:right;">${count} players</span>
+                `;
+                btn.onclick = () => selectClinic(clinic);
+                container.appendChild(btn);
+            });
+        }
+
+        function selectClinic(clinic) {
+            selectedClinic = clinic;
+            allPlayersSelected = false;
+            showRollScreen();
+        }
+
+        // ==================== SCREEN NAVIGATION ====================
+        function showClinicScreen() {
+            document.getElementById('clinic-screen').classList.add('active');
+            document.getElementById('roll-screen').classList.remove('active');
+            // Refresh roster each time we go back
+            loadRoster();
+        }
+
+        function showRollScreen() {
+            document.getElementById('clinic-screen').classList.remove('active');
+            document.getElementById('roll-screen').classList.add('active');
+
+            document.getElementById('selected-clinic-name').textContent = selectedClinic;
+
+            const today = new Date();
+            const dateStr = today.toLocaleDateString('en-US', {
+                weekday: 'long',
+                year: 'numeric',
+                month: 'long',
+                day: 'numeric'
+            });
+            document.getElementById('roll-date').textContent = dateStr;
+
+            renderCoaches();
+            renderPlayers();
+            updateSubmitButton();
+            hideError();
+        }
+
+        // ==================== COACHES ====================
+        function renderCoaches() {
+            const container = document.getElementById('coaches-list');
+            container.innerHTML = '';
+
+            COACHES.forEach(coach => {
+                const item = document.createElement('div');
+                item.className = 'checklist-item';
+                item.innerHTML = `
+                    <div class="checkbox"><span class="checkmark">&#10003;</span></div>
+                    <span class="name">${coach}</span>
+                `;
+                item.onclick = () => {
+                    item.classList.toggle('checked');
+                    updateSubmitButton();
+                };
+                container.appendChild(item);
+            });
+        }
+
+        // ==================== PLAYERS ====================
+        function renderPlayers() {
+            const container = document.getElementById('players-list');
+            container.innerHTML = '';
+
+            const players = rosterData[selectedClinic] || [];
+
+            if (players.length === 0) {
+                container.innerHTML = '<div style="padding:20px;text-align:center;color:#999;">No players found for this clinic.</div>';
+                return;
+            }
+
+            players.forEach(player => {
+                const item = document.createElement('div');
+                item.className = 'checklist-item';
+                item.innerHTML = `
+                    <div class="checkbox"><span class="checkmark">&#10003;</span></div>
+                    <span class="name">${player}</span>
+                `;
+                item.onclick = () => {
+                    item.classList.toggle('checked');
+                    updatePlayerCounter();
+                    updateSubmitButton();
+                };
+                container.appendChild(item);
+            });
+
+            updatePlayerCounter();
+        }
+
+        function updatePlayerCounter() {
+            const items = document.querySelectorAll('#players-list .checklist-item');
+            const checked = document.querySelectorAll('#players-list .checklist-item.checked');
+            document.getElementById('player-counter').textContent = `(${checked.length}/${items.length})`;
+        }
+
+        function toggleSelectAllPlayers() {
+            const items = document.querySelectorAll('#players-list .checklist-item');
+            const allChecked = Array.from(items).every(item => item.classList.contains('checked'));
+
+            items.forEach(item => {
+                if (allChecked) {
+                    item.classList.remove('checked');
+                } else {
+                    item.classList.add('checked');
+                }
+            });
+
+            updatePlayerCounter();
+            updateSubmitButton();
+        }
+
+        // ==================== SUBMIT ====================
+        function updateSubmitButton() {
+            const coaches = document.querySelectorAll('#coaches-list .checklist-item.checked');
+            const players = document.querySelectorAll('#players-list .checklist-item.checked');
+            const btn = document.getElementById('submit-btn');
+
+            if (coaches.length === 0) {
+                btn.disabled = true;
+                btn.textContent = 'Select at least one coach';
+            } else if (players.length === 0) {
+                btn.disabled = true;
+                btn.textContent = 'Select at least one player';
+            } else {
+                btn.disabled = false;
+                btn.textContent = `Submit Attendance (${players.length} players)`;
+            }
+        }
+
+        async function submitRoll() {
+            if (!APPS_SCRIPT_URL) {
+                APPS_SCRIPT_URL = prompt('Enter the Google Apps Script Web App URL:');
+                if (APPS_SCRIPT_URL) {
+                    localStorage.setItem('ijta_apps_script_url', APPS_SCRIPT_URL);
+                } else {
+                    return;
+                }
+            }
+
+            const btn = document.getElementById('submit-btn');
+            btn.disabled = true;
+            btn.textContent = 'Submitting...';
+            hideError();
+
+            // Gather data
+            const today = new Date();
+            const dateStr = `${(today.getMonth() + 1).toString().padStart(2, '0')}/${today.getDate().toString().padStart(2, '0')}/${today.getFullYear()}`;
+
+            const coaches = Array.from(document.querySelectorAll('#coaches-list .checklist-item.checked'))
+                .map(item => item.querySelector('.name').textContent);
+
+            const players = Array.from(document.querySelectorAll('#players-list .checklist-item.checked'))
+                .map(item => item.querySelector('.name').textContent);
+
+            const payload = {
+                date: dateStr,
+                clinic: selectedClinic,
+                coaches: coaches,
+                players: players
+            };
+
+            try {
+                const response = await fetch(APPS_SCRIPT_URL, {
+                    method: 'POST',
+                    mode: 'no-cors',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                // no-cors means we can't read the response, but if it didn't throw, it likely worked
+                showSuccess(players.length, coaches);
+            } catch (error) {
+                console.error('Submit error:', error);
+                showError('Failed to submit attendance. Please check your connection and try again.');
+                btn.disabled = false;
+                btn.textContent = 'Retry Submit';
+            }
+        }
+
+        function showError(msg) {
+            const el = document.getElementById('error-message');
+            el.textContent = msg;
+            el.classList.add('visible');
+        }
+
+        function hideError() {
+            document.getElementById('error-message').classList.remove('visible');
+        }
+
+        function showSuccess(playerCount, coaches) {
+            document.getElementById('success-message').textContent =
+                `${playerCount} player${playerCount !== 1 ? 's' : ''} recorded for ${selectedClinic} with ${coaches.join(', ')}.`;
+            document.getElementById('success-overlay').classList.add('active');
+        }
+
+        function dismissSuccess() {
+            document.getElementById('success-overlay').classList.remove('active');
+            showClinicScreen();
+        }
+    </script>
+</body>
+</html>
