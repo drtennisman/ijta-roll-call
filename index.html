@@ -361,6 +361,80 @@
             color: #888;
             margin-top: 6px;
         }
+
+        /* Member/Guest badge */
+        .badge {
+            font-size: 11px;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 10px;
+            margin-left: 8px;
+            flex-shrink: 0;
+        }
+
+        .badge.member {
+            background: #e8f5e9;
+            color: #2e7d32;
+        }
+
+        .badge.guest {
+            background: #fff3e0;
+            color: #e65100;
+        }
+
+        /* Add player section */
+        .add-player-bar {
+            display: flex;
+            gap: 8px;
+            margin-top: 12px;
+        }
+
+        .add-player-input {
+            flex-grow: 1;
+            padding: 12px 14px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 15px;
+            font-family: inherit;
+            outline: none;
+            transition: border-color 0.15s;
+        }
+
+        .add-player-input:focus {
+            border-color: #2e7d32;
+        }
+
+        .add-player-input::placeholder {
+            color: #bbb;
+        }
+
+        .add-player-btn {
+            padding: 12px 18px;
+            background: #2e7d32;
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: background 0.15s;
+        }
+
+        .add-player-btn:active {
+            background: #1b5e20;
+        }
+
+        .added-tag {
+            font-size: 11px;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 10px;
+            background: #e3f2fd;
+            color: #1565c0;
+            margin-left: 8px;
+            flex-shrink: 0;
+        }
     </style>
 </head>
 <body>
@@ -409,6 +483,11 @@
                 </div>
             </div>
             <div id="players-list" class="checklist"></div>
+
+            <div class="add-player-bar">
+                <input type="text" id="add-player-input" class="add-player-input" placeholder="Last, First (e.g. Smith, John)">
+                <button class="add-player-btn" onclick="addPlayer()">+ Add</button>
+            </div>
         </div>
         <div class="submit-bar">
             <button class="submit-btn" id="submit-btn" onclick="submitRoll()">Submit Attendance</button>
@@ -427,8 +506,17 @@
 
     <script>
         // ==================== CONFIGURATION ====================
-        const ROSTER_SHEET_ID = '1DszkseXqMekH_erFHVEVELcKRI6UgPLexSZ9YtLYqBc';
-        const ROSTER_SHEET_NAME = 'Form Responses 1';
+        // New roster sheet — one tab per clinic
+        const ROSTER_SHEET_ID = '10nb7o9ZJ-fRyTnA2wosGa6OBCTZeEcGAKRAuCY7PZ8E';
+
+        // Maps clinic display names to their tab names in the spreadsheet
+        const CLINICS = [
+            { name: 'Red Ball (Ages 8 and Under)', tab: 'Red Ball' },
+            { name: 'Orange Ball (Ages 10 and Under)', tab: 'Orange Ball' },
+            { name: 'Green Ball (Ages 12 and Under)', tab: 'Green Ball' },
+            { name: 'Middle School Yellow Ball Clinic (Ages 12-14)', tab: 'Middle School' },
+            { name: 'High School Yellow Ball Clinic (Ages 14 and Over)', tab: 'High School' }
+        ];
 
         // Google Apps Script Web App URL
         let APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbw1ucCGAN3UkT3bOxysmNj5-f0KfJLKFeZ-TTbPRygekeK5l1aSjF_IyuT2QcmjPqfL/exec';
@@ -445,34 +533,13 @@
             'Ellis Zapalowski'
         ];
 
-        const CLINICS = [
-            'Red Ball (Ages 8 and Under)',
-            'Orange Ball (Ages 10 and Under)',
-            'Green Ball (Ages 12 and Under)',
-            'Middle School Yellow Ball Clinic (Ages 12-14)',
-            'High School Yellow Ball Clinic (Ages 14 and Over)'
-        ];
-
-        // Column indices for child data (0-based) in the CSV
-        // Child 1: Name=5, Clinic=7
-        // Child 2: Name=12, Clinic=14
-        // Child 3: Name=18, Clinic=20
-        // Child 4: Name=24, Clinic=26
-        const CHILD_COLUMNS = [
-            { name: 5, clinic: 7 },
-            { name: 12, clinic: 14 },
-            { name: 18, clinic: 20 },
-            { name: 24, clinic: 26 }
-        ];
-
         // ==================== STATE ====================
-        let rosterData = {};  // { clinicName: [playerNames] }
-        let selectedClinic = '';
-        let allPlayersSelected = false;
+        let rosterData = {};  // { clinicName: [ { name: "Last, First", status: "M"|"G" } ] }
+        let selectedClinic = null;  // the clinic object from CLINICS
 
         // ==================== INITIALIZATION ====================
         document.addEventListener('DOMContentLoaded', () => {
-            loadRoster();
+            loadAllRosters();
             checkAppsScriptUrl();
         });
 
@@ -483,18 +550,32 @@
         }
 
         // ==================== ROSTER LOADING ====================
-        async function loadRoster() {
+        async function loadAllRosters() {
             try {
-                const url = `https://docs.google.com/spreadsheets/d/${ROSTER_SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(ROSTER_SHEET_NAME)}`;
-                const response = await fetch(url);
-                if (!response.ok) throw new Error('Failed to fetch roster');
-                const csvText = await response.text();
-                parseRoster(csvText);
+                document.getElementById('clinic-list').innerHTML =
+                    '<div class="loading"><div class="spinner"></div><div>Loading clinics...</div></div>';
+
+                // Fetch all clinic tabs in parallel
+                const fetches = CLINICS.map(clinic => loadClinicRoster(clinic));
+                await Promise.all(fetches);
                 renderClinicList();
             } catch (error) {
-                console.error('Error loading roster:', error);
+                console.error('Error loading rosters:', error);
                 document.getElementById('clinic-list').innerHTML =
-                    '<div class="error-msg visible">Failed to load roster. Please check your internet connection and try again.</div>';
+                    '<div class="error-msg visible">Failed to load rosters. Please check your internet connection and try again.</div>';
+            }
+        }
+
+        async function loadClinicRoster(clinic) {
+            try {
+                const url = `https://docs.google.com/spreadsheets/d/${ROSTER_SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(clinic.tab)}`;
+                const response = await fetch(url);
+                if (!response.ok) throw new Error(`Failed to fetch ${clinic.tab}`);
+                const csvText = await response.text();
+                rosterData[clinic.name] = parseClinicCSV(csvText);
+            } catch (error) {
+                console.error(`Error loading ${clinic.tab}:`, error);
+                rosterData[clinic.name] = [];
             }
         }
 
@@ -531,54 +612,29 @@
             return result;
         }
 
-        function parseRoster(csvText) {
-            rosterData = {};
-            CLINICS.forEach(c => rosterData[c] = []);
-
+        function parseClinicCSV(csvText) {
+            const players = [];
             const lines = csvText.split('\n').filter(line => line.trim());
-            // Skip header row
+
+            // Skip header row (Last Name, First Name, Status)
             for (let i = 1; i < lines.length; i++) {
                 const cols = parseCSVRow(lines[i]);
+                const lastName = (cols[0] || '').trim();
+                const firstName = (cols[1] || '').trim();
+                const status = (cols[2] || 'M').trim().toUpperCase();
 
-                for (const child of CHILD_COLUMNS) {
-                    const name = cols[child.name] || '';
-                    const clinicField = cols[child.clinic] || '';
+                if (!lastName && !firstName) continue;
 
-                    if (!name || !clinicField) continue;
-
-                    // A child can be signed up for multiple clinics (comma-separated)
-                    const childClinics = clinicField.split(',').map(c => c.trim());
-
-                    for (const clinicName of childClinics) {
-                        // Match to our known clinics
-                        const matched = CLINICS.find(c =>
-                            c.toLowerCase() === clinicName.toLowerCase() ||
-                            clinicName.toLowerCase().includes(c.toLowerCase()) ||
-                            c.toLowerCase().includes(clinicName.toLowerCase())
-                        );
-
-                        if (matched) {
-                            const formattedName = formatName(name);
-                            if (!rosterData[matched].includes(formattedName)) {
-                                rosterData[matched].push(formattedName);
-                            }
-                        }
-                    }
-                }
+                const displayName = firstName ? `${lastName}, ${firstName}` : lastName;
+                players.push({
+                    name: displayName,
+                    status: status === 'G' ? 'G' : 'M'  // Default to Member if not specified
+                });
             }
 
-            // Sort players alphabetically by last name (already in "Last, First" format)
-            for (const clinic of CLINICS) {
-                rosterData[clinic].sort((a, b) => a.localeCompare(b));
-            }
-        }
-
-        function formatName(fullName) {
-            const parts = fullName.trim().split(/\s+/);
-            if (parts.length === 1) return parts[0];
-            const lastName = parts[parts.length - 1];
-            const firstName = parts.slice(0, -1).join(' ');
-            return `${lastName}, ${firstName}`;
+            // Sort alphabetically by last name (already "Last, First")
+            players.sort((a, b) => a.name.localeCompare(b.name));
+            return players;
         }
 
         // ==================== CLINIC SELECTION ====================
@@ -587,14 +643,14 @@
             container.innerHTML = '';
 
             CLINICS.forEach(clinic => {
-                const count = rosterData[clinic] ? rosterData[clinic].length : 0;
+                const players = rosterData[clinic.name] || [];
                 const btn = document.createElement('button');
                 btn.className = 'clinic-btn';
-                btn.setAttribute('data-clinic', clinic);
+                btn.setAttribute('data-clinic', clinic.name);
                 btn.innerHTML = `
                     <span class="clinic-icon"></span>
-                    ${clinic}
-                    <span class="counter" style="float:right;">${count} players</span>
+                    ${clinic.name}
+                    <span class="counter" style="float:right;">${players.length} players</span>
                 `;
                 btn.onclick = () => selectClinic(clinic);
                 container.appendChild(btn);
@@ -603,7 +659,6 @@
 
         function selectClinic(clinic) {
             selectedClinic = clinic;
-            allPlayersSelected = false;
             showRollScreen();
         }
 
@@ -611,15 +666,15 @@
         function showClinicScreen() {
             document.getElementById('clinic-screen').classList.add('active');
             document.getElementById('roll-screen').classList.remove('active');
-            // Refresh roster each time we go back
-            loadRoster();
+            // Refresh rosters each time we go back
+            loadAllRosters();
         }
 
         function showRollScreen() {
             document.getElementById('clinic-screen').classList.remove('active');
             document.getElementById('roll-screen').classList.add('active');
 
-            document.getElementById('selected-clinic-name').textContent = selectedClinic;
+            document.getElementById('selected-clinic-name').textContent = selectedClinic.name;
 
             const today = new Date();
             const dateStr = today.toLocaleDateString('en-US', {
@@ -629,6 +684,9 @@
                 day: 'numeric'
             });
             document.getElementById('roll-date').textContent = dateStr;
+
+            // Clear the add-player input
+            document.getElementById('add-player-input').value = '';
 
             renderCoaches();
             renderPlayers();
@@ -661,30 +719,90 @@
             const container = document.getElementById('players-list');
             container.innerHTML = '';
 
-            const players = rosterData[selectedClinic] || [];
+            const players = rosterData[selectedClinic.name] || [];
 
             if (players.length === 0) {
-                container.innerHTML = '<div style="padding:20px;text-align:center;color:#999;">No players found for this clinic.</div>';
+                container.innerHTML = '<div style="padding:20px;text-align:center;color:#999;">No players on roster. Use "Add" below for walk-ins.</div>';
+                updatePlayerCounter();
                 return;
             }
 
             players.forEach(player => {
-                const item = document.createElement('div');
-                item.className = 'checklist-item';
-                item.innerHTML = `
-                    <div class="checkbox"><span class="checkmark">&#10003;</span></div>
-                    <span class="name">${player}</span>
-                `;
-                item.onclick = () => {
-                    item.classList.toggle('checked');
-                    updatePlayerCounter();
-                    updateSubmitButton();
-                };
-                container.appendChild(item);
+                addPlayerToList(container, player.name, player.status, false);
             });
 
             updatePlayerCounter();
         }
+
+        function addPlayerToList(container, name, status, isAdded) {
+            const item = document.createElement('div');
+            item.className = 'checklist-item';
+
+            let badgeHTML = '';
+            if (isAdded) {
+                badgeHTML = '<span class="added-tag">Added</span>';
+            }
+            if (status === 'G') {
+                badgeHTML += '<span class="badge guest">Guest</span>';
+            } else {
+                badgeHTML += '<span class="badge member">Member</span>';
+            }
+
+            item.innerHTML = `
+                <div class="checkbox"><span class="checkmark">&#10003;</span></div>
+                <span class="name">${name}</span>
+                ${badgeHTML}
+            `;
+            item.setAttribute('data-status', status);
+            item.onclick = () => {
+                item.classList.toggle('checked');
+                updatePlayerCounter();
+                updateSubmitButton();
+            };
+
+            // If this is an added player, auto-check them and add to end
+            if (isAdded) {
+                item.classList.add('checked');
+                container.appendChild(item);
+            } else {
+                container.appendChild(item);
+            }
+        }
+
+        function addPlayer() {
+            const input = document.getElementById('add-player-input');
+            const name = input.value.trim();
+
+            if (!name) return;
+
+            const container = document.getElementById('players-list');
+
+            // Remove the "no players" message if present
+            const noPlayersMsg = container.querySelector('div[style]');
+            if (noPlayersMsg && noPlayersMsg.textContent.includes('No players')) {
+                container.innerHTML = '';
+            }
+
+            // Add as Guest by default for walk-ins
+            addPlayerToList(container, name, 'G', true);
+
+            input.value = '';
+            updatePlayerCounter();
+            updateSubmitButton();
+
+            // Scroll to the new player
+            container.lastChild.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+
+        // Allow Enter key to add player
+        document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('add-player-input').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    addPlayer();
+                }
+            });
+        });
 
         function updatePlayerCounter() {
             const items = document.querySelectorAll('#players-list .checklist-item');
@@ -748,12 +866,15 @@
             const coaches = Array.from(document.querySelectorAll('#coaches-list .checklist-item.checked'))
                 .map(item => item.querySelector('.name').textContent);
 
-            const players = Array.from(document.querySelectorAll('#players-list .checklist-item.checked'))
-                .map(item => item.querySelector('.name').textContent);
+            const checkedItems = document.querySelectorAll('#players-list .checklist-item.checked');
+            const players = Array.from(checkedItems).map(item => ({
+                name: item.querySelector('.name').textContent,
+                status: item.getAttribute('data-status') || 'M'
+            }));
 
             const payload = {
                 date: dateStr,
-                clinic: selectedClinic,
+                clinic: selectedClinic.name,
                 coaches: coaches,
                 players: players
             };
@@ -788,7 +909,7 @@
 
         function showSuccess(playerCount, coaches) {
             document.getElementById('success-message').textContent =
-                `${playerCount} player${playerCount !== 1 ? 's' : ''} recorded for ${selectedClinic} with ${coaches.join(', ')}.`;
+                `${playerCount} player${playerCount !== 1 ? 's' : ''} recorded for ${selectedClinic.name} with ${coaches.join(', ')}.`;
             document.getElementById('success-overlay').classList.add('active');
         }
 

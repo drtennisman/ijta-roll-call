@@ -31,10 +31,10 @@ function doPost(e) {
     // Create the Attendance sheet with headers if it doesn't exist
     if (!sheet) {
       sheet = ss.insertSheet('Attendance');
-      sheet.appendRow(['Date', 'Clinic', 'Coaches', 'Player Name']);
+      sheet.appendRow(['Date', 'Clinic', 'Coaches', 'Player Name', 'Status']);
 
       // Format header row
-      const headerRange = sheet.getRange(1, 1, 1, 4);
+      const headerRange = sheet.getRange(1, 1, 1, 5);
       headerRange.setFontWeight('bold');
       headerRange.setBackground('#2e7d32');
       headerRange.setFontColor('white');
@@ -44,6 +44,7 @@ function doPost(e) {
       sheet.setColumnWidth(2, 300);  // Clinic
       sheet.setColumnWidth(3, 250);  // Coaches
       sheet.setColumnWidth(4, 200);  // Player Name
+      sheet.setColumnWidth(5, 80);   // Status (M/G)
 
       // Freeze header row
       sheet.setFrozenRows(1);
@@ -51,14 +52,17 @@ function doPost(e) {
 
     const coachesStr = coaches.join(', ');
 
+    // Players now come as objects: { name: "Last, First", status: "M"|"G" }
     // Add one row per player
     // Coaches only appear on the first row of each session
     for (let i = 0; i < players.length; i++) {
+      const player = typeof players[i] === 'string' ? { name: players[i], status: 'M' } : players[i];
       const row = [
         date,
         clinic,
         i === 0 ? coachesStr : '',  // Coaches only on first row
-        players[i]
+        player.name,
+        player.status || 'M'
       ];
       sheet.appendRow(row);
     }
