@@ -621,14 +621,18 @@
                 const cols = parseCSVRow(lines[i]);
                 const lastName = (cols[0] || '').trim();
                 const firstName = (cols[1] || '').trim();
-                const status = (cols[2] || 'M').trim().toUpperCase();
+                const rawStatus = (cols[2] || 'M').trim().toUpperCase();
 
                 if (!lastName && !firstName) continue;
+
+                // Accept "G", "Guest", "M", "Member" (or anything else defaults to Member)
+                const isGuest = rawStatus === 'G' || rawStatus === 'GUEST';
+                const status = isGuest ? 'G' : 'M';
 
                 const displayName = firstName ? `${lastName}, ${firstName}` : lastName;
                 players.push({
                     name: displayName,
-                    status: status === 'G' ? 'G' : 'M'  // Default to Member if not specified
+                    status: status
                 });
             }
 
