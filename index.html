@@ -33,6 +33,15 @@
             box-shadow: 0 2px 4px rgba(0,0,0,0.2);
         }
 
+        .header-logo {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            margin-right: 10px;
+            flex-shrink: 0;
+            object-fit: cover;
+        }
+
         .header h1 {
             font-size: 20px;
             font-weight: 600;
@@ -444,6 +453,7 @@
     <div id="clinic-screen" class="screen active">
         <div class="header">
             <div class="header-inner">
+                <img src="ijta-logo.png" alt="IJTA Logo" class="header-logo">
                 <div>
                     <h1>IJTA Roll Call</h1>
                     <div class="subtitle">Select a Clinic</div>
@@ -465,6 +475,7 @@
         <div class="header">
             <div class="header-inner">
                 <button class="back-btn" onclick="showClinicScreen()">&#8592; Back</button>
+                <img src="ijta-logo.png" alt="IJTA Logo" class="header-logo">
                 <div>
                     <h1 id="selected-clinic-name">Clinic Name</h1>
                     <div class="subtitle" id="roll-date"></div>
