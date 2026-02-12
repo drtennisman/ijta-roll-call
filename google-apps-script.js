@@ -343,3 +343,30 @@ function generateLastMonthBilling() {
   }
   generateMonthlyBilling(month, year);
 }
+
+// ============================================================
+// AUTOMATIC MONTHLY TRIGGER
+// ============================================================
+// Run setupMonthlyTrigger() once from the Apps Script editor.
+// It will schedule generateLastMonthBilling to run automatically
+// on the 1st of every month between midnight and 1am.
+// ============================================================
+
+function setupMonthlyTrigger() {
+  // Remove any existing billing triggers to avoid duplicates
+  const triggers = ScriptApp.getProjectTriggers();
+  for (const trigger of triggers) {
+    if (trigger.getHandlerFunction() === 'generateLastMonthBilling') {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  }
+
+  // Create a new monthly trigger — runs on the 1st of each month
+  ScriptApp.newTrigger('generateLastMonthBilling')
+    .timeBased()
+    .onMonthDay(1)
+    .atHour(0)
+    .create();
+
+  Logger.log('Monthly billing trigger set up — will run on the 1st of each month');
+}
