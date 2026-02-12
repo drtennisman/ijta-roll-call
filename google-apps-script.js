@@ -117,6 +117,10 @@ const PRICING = {
   'High School Yellow Ball Clinic (Ages 14 and Over)': {
     M: [0, 25, 50, 75, 100, 125, 150, 175, 200, 200, 225, 250, 275, 300, 325, 350],
     G: [0, 30, 60, 90, 120, 150, 180, 210, 240, 240, 270, 300, 330, 360, 390, 420]
+  },
+  'Bruno': {
+    M: [0, 20, 40, 60, 80, 100, 120, 140, 160, 180, 200],
+    G: [0, 20, 40, 60, 80, 100, 120, 140, 160, 180, 200]
   }
 };
 
@@ -126,7 +130,8 @@ const PER_SESSION_RATE = {
   'Orange Ball (Ages 10 and Under)':                   { M: 15, G: 20 },
   'Green Ball (Ages 12 and Under)':                    { M: 20, G: 25 },
   'Middle School Yellow Ball Clinic (Ages 12-14)':     { M: 25, G: 30 },
-  'High School Yellow Ball Clinic (Ages 14 and Over)': { M: 25, G: 30 }
+  'High School Yellow Ball Clinic (Ages 14 and Over)': { M: 25, G: 30 },
+  'Bruno':                                              { M: 20, G: 20 }
 };
 
 function getTotalCharge(clinic, status, sessions) {

@@ -517,7 +517,7 @@
             { name: 'Green Ball (Ages 12 and Under)', tab: 'Green Ball' },
             { name: 'Middle School Yellow Ball Clinic (Ages 12-14)', tab: 'Middle School' },
             { name: 'High School Yellow Ball Clinic (Ages 14 and Over)', tab: 'High School' },
-            { name: 'Bruno', tab: 'Bruno' }
+            { name: 'Bruno', tab: 'Bruno', hideBadge: true }
         ];
 
         // Google Apps Script Web App URL
@@ -748,10 +748,12 @@
             if (isAdded) {
                 badgeHTML = '<span class="added-tag">Added</span>';
             }
-            if (status === 'G') {
-                badgeHTML += '<span class="badge guest">Guest</span>';
-            } else {
-                badgeHTML += '<span class="badge member">Member</span>';
+            if (!selectedClinic.hideBadge) {
+                if (status === 'G') {
+                    badgeHTML += '<span class="badge guest">Guest</span>';
+                } else {
+                    badgeHTML += '<span class="badge member">Member</span>';
+                }
             }
 
             item.innerHTML = `
