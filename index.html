@@ -526,12 +526,12 @@
 
         // Maps clinic display names to their tab names in the spreadsheet
         const CLINICS = [
-            { name: 'Red Ball (Ages 8 and Under)', tab: 'Red Ball' },
-            { name: 'Orange Ball (Ages 10 and Under)', tab: 'Orange Ball' },
-            { name: 'Green Ball (Ages 12 and Under)', tab: 'Green Ball' },
-            { name: 'Middle School Yellow Ball Clinic (Ages 12-14)', tab: 'Middle School' },
-            { name: 'High School Yellow Ball Clinic (Ages 14 and Over)', tab: 'High School' },
-            { name: 'Bruno', tab: 'Bruno', hideBadge: true }
+            { name: 'Red Ball (Ages 8 and Under)', display: 'Red Ball', tab: 'Red Ball' },
+            { name: 'Orange Ball (Ages 10 and Under)', display: 'Orange Ball', tab: 'Orange Ball' },
+            { name: 'Green Ball (Ages 12 and Under)', display: 'Green Ball', tab: 'Green Ball' },
+            { name: 'Middle School Yellow Ball Clinic (Ages 12-14)', display: 'Middle School Yellow Ball', tab: 'Middle School' },
+            { name: 'High School Yellow Ball Clinic (Ages 14 and Over)', display: 'High School Yellow Ball', tab: 'High School' },
+            { name: 'Bruno', display: 'Bruno', tab: 'Bruno', hideBadge: true }
         ];
 
         // Google Apps Script Web App URL
@@ -669,7 +669,7 @@
                 btn.setAttribute('data-clinic', clinic.name);
                 btn.innerHTML = `
                     <span class="clinic-icon"></span>
-                    ${clinic.name}
+                    ${clinic.display}
                     <span class="counter" style="float:right;">${players.length} players</span>
                 `;
                 btn.onclick = () => selectClinic(clinic);
@@ -694,7 +694,7 @@
             document.getElementById('clinic-screen').classList.remove('active');
             document.getElementById('roll-screen').classList.add('active');
 
-            document.getElementById('selected-clinic-name').textContent = selectedClinic.name;
+            document.getElementById('selected-clinic-name').textContent = selectedClinic.display;
 
             const today = new Date();
             const dateStr = today.toLocaleDateString('en-US', {
