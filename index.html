@@ -26,33 +26,35 @@
             background: #021f3d;
             color: white;
             padding: 14px 20px;
-            text-align: center;
             position: sticky;
             top: 0;
             z-index: 100;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.25);
         }
 
         .header-logo {
-            width: 48px;
-            height: 48px;
+            width: 44px;
+            height: 44px;
             border-radius: 50%;
-            margin-bottom: 6px;
             flex-shrink: 0;
             object-fit: cover;
-            border: 2.5px solid white;
-            box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+            border: 2px solid rgba(255,255,255,0.9);
+            box-shadow: 0 1px 4px rgba(0,0,0,0.2);
         }
 
         .header h1 {
-            font-size: 20px;
-            font-weight: 600;
+            font-size: 19px;
+            font-weight: 700;
+            letter-spacing: 0.3px;
+            line-height: 1.2;
         }
 
         .header .subtitle {
             font-size: 12px;
-            opacity: 0.85;
+            opacity: 0.7;
             margin-top: 2px;
+            font-weight: 500;
+            letter-spacing: 0.2px;
         }
 
         .container {
@@ -209,25 +211,36 @@
             gap: 4px;
             background: none;
             border: none;
-            color: white;
+            color: rgba(255,255,255,0.85);
             font-size: 14px;
+            font-weight: 500;
             cursor: pointer;
             position: absolute;
-            left: 16px;
+            left: 0;
             top: 50%;
             transform: translateY(-50%);
+            padding: 4px 0;
+            transition: color 0.15s;
         }
 
-        .header {
-            position: sticky;
+        .back-btn:active {
+            color: white;
         }
 
         .header-inner {
             position: relative;
             display: flex;
-            flex-direction: column;
+            flex-direction: row;
             align-items: center;
             justify-content: center;
+            gap: 14px;
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        .header-text {
+            display: flex;
+            flex-direction: column;
         }
 
         /* Submit button */
@@ -457,7 +470,7 @@
         <div class="header">
             <div class="header-inner">
                 <img src="ijta-logo.png" alt="IJTA Logo" class="header-logo">
-                <div>
+                <div class="header-text">
                     <h1>IJTA Roll Call</h1>
                     <div class="subtitle">Select a Clinic</div>
                 </div>
@@ -479,7 +492,7 @@
             <div class="header-inner">
                 <button class="back-btn" onclick="showClinicScreen()">&#8592; Back</button>
                 <img src="ijta-logo.png" alt="IJTA Logo" class="header-logo">
-                <div>
+                <div class="header-text">
                     <h1 id="selected-clinic-name">Clinic Name</h1>
                     <div class="subtitle" id="roll-date"></div>
                 </div>
