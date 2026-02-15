@@ -472,10 +472,13 @@
             padding: 16px 20px;
             background: linear-gradient(135deg, #052d54 0%, #021f3d 100%);
             border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(2, 31, 61, 0.25);
+        }
+
+        .total-juniors-top {
             display: flex;
             align-items: center;
             justify-content: space-between;
-            box-shadow: 0 2px 8px rgba(2, 31, 61, 0.25);
         }
 
         .total-juniors-label {
@@ -491,6 +494,47 @@
             font-weight: 700;
             color: white;
             line-height: 1;
+        }
+
+        .total-juniors-breakdown {
+            display: flex;
+            gap: 12px;
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid rgba(255,255,255,0.12);
+        }
+
+        .breakdown-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .breakdown-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        .breakdown-dot.member {
+            background: #64b5f6;
+        }
+
+        .breakdown-dot.guest {
+            background: #ffb74d;
+        }
+
+        .breakdown-text {
+            font-size: 12px;
+            color: rgba(255,255,255,0.6);
+            font-weight: 500;
+        }
+
+        .breakdown-num {
+            font-size: 13px;
+            color: white;
+            font-weight: 700;
         }
     </style>
 </head>
@@ -515,8 +559,22 @@
                 </div>
             </div>
             <div id="total-juniors" class="total-juniors-bar" style="display:none;">
-                <span class="total-juniors-label">Total Juniors</span>
-                <span class="total-juniors-count" id="total-juniors-count">0</span>
+                <div class="total-juniors-top">
+                    <span class="total-juniors-label">Total Juniors</span>
+                    <span class="total-juniors-count" id="total-juniors-count">0</span>
+                </div>
+                <div class="total-juniors-breakdown">
+                    <div class="breakdown-item">
+                        <span class="breakdown-dot member"></span>
+                        <span class="breakdown-text">Members</span>
+                        <span class="breakdown-num" id="total-members-count">0</span>
+                    </div>
+                    <div class="breakdown-item">
+                        <span class="breakdown-dot guest"></span>
+                        <span class="breakdown-text">Guests</span>
+                        <span class="breakdown-num" id="total-guests-count">0</span>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -711,6 +769,8 @@
             container.innerHTML = '';
 
             let totalJuniors = 0;
+            let totalMembers = 0;
+            let totalGuests = 0;
 
             CLINICS.forEach(clinic => {
                 const players = rosterData[clinic.name] || [];
@@ -726,11 +786,17 @@
                 container.appendChild(btn);
 
                 totalJuniors += players.length;
+                players.forEach(p => {
+                    if (p.status === 'G') totalGuests++;
+                    else totalMembers++;
+                });
             });
 
             // Show total juniors tracker
             const totalBar = document.getElementById('total-juniors');
             document.getElementById('total-juniors-count').textContent = totalJuniors;
+            document.getElementById('total-members-count').textContent = totalMembers;
+            document.getElementById('total-guests-count').textContent = totalGuests;
             totalBar.style.display = '';
         }
 
