@@ -465,6 +465,33 @@
             margin-left: 8px;
             flex-shrink: 0;
         }
+
+        /* Total juniors tracker */
+        .total-juniors-bar {
+            margin-top: 20px;
+            padding: 16px 20px;
+            background: linear-gradient(135deg, #052d54 0%, #021f3d 100%);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow: 0 2px 8px rgba(2, 31, 61, 0.25);
+        }
+
+        .total-juniors-label {
+            font-size: 13px;
+            font-weight: 600;
+            color: rgba(255,255,255,0.7);
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+        }
+
+        .total-juniors-count {
+            font-size: 28px;
+            font-weight: 700;
+            color: white;
+            line-height: 1;
+        }
     </style>
 </head>
 <body>
@@ -486,6 +513,10 @@
                     <div class="spinner"></div>
                     <div>Loading clinics...</div>
                 </div>
+            </div>
+            <div id="total-juniors" class="total-juniors-bar" style="display:none;">
+                <span class="total-juniors-label">Total Juniors</span>
+                <span class="total-juniors-count" id="total-juniors-count">0</span>
             </div>
         </div>
     </div>
@@ -679,6 +710,8 @@
             const container = document.getElementById('clinic-list');
             container.innerHTML = '';
 
+            let totalJuniors = 0;
+
             CLINICS.forEach(clinic => {
                 const players = rosterData[clinic.name] || [];
                 const btn = document.createElement('button');
@@ -691,7 +724,14 @@
                 `;
                 btn.onclick = () => selectClinic(clinic);
                 container.appendChild(btn);
+
+                totalJuniors += players.length;
             });
+
+            // Show total juniors tracker
+            const totalBar = document.getElementById('total-juniors');
+            document.getElementById('total-juniors-count').textContent = totalJuniors;
+            totalBar.style.display = '';
         }
 
         function selectClinic(clinic) {
