@@ -93,7 +93,7 @@ function doGet(e) {
 // or set up a monthly trigger (Edit > Triggers).
 // ============================================================
 
-const BILLING_SHEET_ID = '1oSq9ES2qPgR2B9PaKHZEmVeZodMVpVI8UZ1xQE8aBeo';
+const BILLING_SHEET_ID = '1GXysHPQzxIRZnxPPnlnZksL-b7Vc2cIJamcgBR75-oI';
 
 // Pricing lookup tables — total charged for N sessions
 // Taken directly from the pricing spreadsheet
