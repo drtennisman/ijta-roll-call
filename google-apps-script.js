@@ -19,11 +19,12 @@
 // ============================================================
 
 const ATTENDANCE_SHEET_ID = '1ipQEh5KCRywBOin8GM4xjzvGh9iK1YWp8VD9BXGH_YA';
+const ROSTER_SHEET_ID = '10nb7o9ZJ-fRyTnA2wosGa6OBCTZeEcGAKRAuCY7PZ8E';
 
 function doPost(e) {
   try {
     const data = JSON.parse(e.postData.contents);
-    const { date, clinic, coaches, players } = data;
+    const { date, clinic, clinicTab, coaches, players } = data;
 
     const ss = SpreadsheetApp.openById(ATTENDANCE_SHEET_ID);
     let sheet = ss.getSheetByName('Attendance');
@@ -67,8 +68,11 @@ function doPost(e) {
       sheet.appendRow(row);
     }
 
+    // Auto-add new players to the master roster sheet
+    const added = addNewPlayersToRoster(clinicTab, players);
+
     return ContentService
-      .createTextOutput(JSON.stringify({ success: true, playersRecorded: players.length }))
+      .createTextOutput(JSON.stringify({ success: true, playersRecorded: players.length, rosterAdded: added }))
       .setMimeType(ContentService.MimeType.JSON);
 
   } catch (error) {
@@ -83,6 +87,65 @@ function doGet(e) {
   return ContentService
     .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running' }))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+// ============================================================
+// AUTO-ADD NEW PLAYERS TO MASTER ROSTER
+// ============================================================
+// When attendance is submitted, any player not already on the
+// clinic's roster tab gets appended automatically.
+// ============================================================
+
+function addNewPlayersToRoster(clinicTab, players) {
+  if (!clinicTab || !players || players.length === 0) return 0;
+
+  try {
+    const rosterSS = SpreadsheetApp.openById(ROSTER_SHEET_ID);
+    const rosterSheet = rosterSS.getSheetByName(clinicTab);
+    if (!rosterSheet) return 0;
+
+    // Read existing roster names (columns A and B: Last Name, First Name)
+    const lastRow = rosterSheet.getLastRow();
+    const existingNames = new Set();
+
+    if (lastRow > 1) {
+      const nameData = rosterSheet.getRange(2, 1, lastRow - 1, 2).getValues();
+      for (const row of nameData) {
+        const last = (row[0] || '').toString().trim();
+        const first = (row[1] || '').toString().trim();
+        if (last || first) {
+          // Normalize to "Last, First" for comparison
+          const fullName = first ? last + ', ' + first : last;
+          existingNames.add(fullName.toLowerCase());
+        }
+      }
+    }
+
+    // Check each submitted player against the roster
+    let addedCount = 0;
+    for (const p of players) {
+      const player = typeof p === 'string' ? { name: p, status: 'M' } : p;
+      const name = (player.name || '').trim();
+      if (!name) continue;
+
+      if (!existingNames.has(name.toLowerCase())) {
+        // Split "Last, First" into separate columns
+        const parts = name.split(',');
+        const lastName = (parts[0] || '').trim();
+        const firstName = (parts[1] || '').trim();
+        const status = player.status === 'G' ? 'G' : 'M';
+
+        rosterSheet.appendRow([lastName, firstName, status]);
+        existingNames.add(name.toLowerCase());
+        addedCount++;
+      }
+    }
+
+    return addedCount;
+  } catch (error) {
+    Logger.log('Error adding to roster: ' + error.toString());
+    return 0;
+  }
 }
 
 // ============================================================
