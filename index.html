@@ -1057,13 +1057,18 @@
             try {
                 const response = await fetch(APPS_SCRIPT_URL, {
                     method: 'POST',
-                    mode: 'no-cors',
-                    headers: { 'Content-Type': 'application/json' },
+                    redirect: 'follow',
+                    headers: { 'Content-Type': 'text/plain' },
                     body: JSON.stringify(payload)
                 });
 
-                // no-cors means we can't read the response, but if it didn't throw, it likely worked
-                showSuccess(players.length, coaches);
+                const result = await response.json();
+
+                if (result.success) {
+                    showSuccess(players.length, coaches);
+                } else {
+                    throw new Error(result.error || 'Unknown server error');
+                }
             } catch (error) {
                 console.error('Submit error:', error);
                 showError('Failed to submit attendance. Please check your connection and try again.');
