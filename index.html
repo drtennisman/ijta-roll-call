@@ -417,6 +417,37 @@
             display: flex;
             gap: 8px;
             margin-top: 12px;
+            flex-wrap: wrap;
+        }
+
+        .add-player-row {
+            display: flex;
+            gap: 8px;
+            flex: 1;
+            min-width: 0;
+        }
+
+        .add-player-type {
+            padding: 12px 10px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 14px;
+            font-family: inherit;
+            background: white;
+            color: #333;
+            outline: none;
+            cursor: pointer;
+            transition: border-color 0.15s;
+            -webkit-appearance: none;
+            appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23666' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 10px center;
+            padding-right: 28px;
+        }
+
+        .add-player-type:focus {
+            border-color: #021f3d;
         }
 
         .add-player-input {
@@ -607,6 +638,10 @@
 
             <div class="add-player-bar">
                 <input type="text" id="add-player-input" class="add-player-input" placeholder="Last, First (e.g. Smith, John)">
+                <select id="add-player-type" class="add-player-type">
+                    <option value="M">Member</option>
+                    <option value="G">Guest</option>
+                </select>
                 <button class="add-player-btn" onclick="addPlayer()">+ Add</button>
             </div>
         </div>
@@ -928,8 +963,9 @@
                 container.innerHTML = '';
             }
 
-            // Add as Guest by default for walk-ins
-            addPlayerToList(container, name, 'G', true);
+            // Use the selected type (Member or Guest)
+            const status = document.getElementById('add-player-type').value;
+            addPlayerToList(container, name, status, true);
 
             input.value = '';
             updatePlayerCounter();
