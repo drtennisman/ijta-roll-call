@@ -420,13 +420,6 @@
             flex-wrap: wrap;
         }
 
-        .add-player-row {
-            display: flex;
-            gap: 8px;
-            flex: 1;
-            min-width: 0;
-        }
-
         .add-player-type {
             padding: 12px 10px;
             border: 2px solid #e0e0e0;
@@ -1091,7 +1084,7 @@
 
         function showSuccess(playerCount, coaches) {
             document.getElementById('success-message').textContent =
-                `${playerCount} player${playerCount !== 1 ? 's' : ''} recorded for ${selectedClinic.name} with ${coaches.join(', ')}.`;
+                `${playerCount} player${playerCount !== 1 ? 's' : ''} recorded for ${selectedClinic.display} with ${coaches.join(', ')}.`;
             document.getElementById('success-overlay').classList.add('active');
         }
 
