@@ -412,6 +412,43 @@
             color: #e65100;
         }
 
+        /* Date picker */
+        .date-picker-bar {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 16px;
+            padding: 12px 16px;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+        }
+
+        .date-picker-label {
+            font-size: 13px;
+            font-weight: 600;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            flex-shrink: 0;
+        }
+
+        .date-picker-input {
+            flex-grow: 1;
+            padding: 8px 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 15px;
+            font-family: inherit;
+            color: #333;
+            outline: none;
+            transition: border-color 0.15s;
+        }
+
+        .date-picker-input:focus {
+            border-color: #021f3d;
+        }
+
         /* Add player section */
         .add-player-bar {
             display: flex;
@@ -617,6 +654,11 @@
         </div>
         <div class="container roll-screen-content">
             <div id="error-message" class="error-msg"></div>
+
+            <div class="date-picker-bar">
+                <span class="date-picker-label">Date</span>
+                <input type="date" id="roll-date-input" class="date-picker-input">
+            </div>
 
             <div class="section-title">Coaches</div>
             <div id="coaches-list" class="checklist"></div>
@@ -847,14 +889,13 @@
 
             document.getElementById('selected-clinic-name').textContent = selectedClinic.display;
 
+            // Set date picker to today
             const today = new Date();
-            const dateStr = today.toLocaleDateString('en-US', {
-                weekday: 'long',
-                year: 'numeric',
-                month: 'long',
-                day: 'numeric'
-            });
-            document.getElementById('roll-date').textContent = dateStr;
+            const yyyy = today.getFullYear();
+            const mm = (today.getMonth() + 1).toString().padStart(2, '0');
+            const dd = today.getDate().toString().padStart(2, '0');
+            document.getElementById('roll-date-input').value = `${yyyy}-${mm}-${dd}`;
+            updateHeaderDate();
 
             // Clear the add-player input
             document.getElementById('add-player-input').value = '';
@@ -864,6 +905,24 @@
             updateSubmitButton();
             hideError();
         }
+
+        function updateHeaderDate() {
+            const input = document.getElementById('roll-date-input');
+            const parts = input.value.split('-');
+            const d = new Date(parts[0], parts[1] - 1, parts[2]);
+            const dateStr = d.toLocaleDateString('en-US', {
+                weekday: 'long',
+                year: 'numeric',
+                month: 'long',
+                day: 'numeric'
+            });
+            document.getElementById('roll-date').textContent = dateStr;
+        }
+
+        // Listen for date changes
+        document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('roll-date-input').addEventListener('change', updateHeaderDate);
+        });
 
         // ==================== COACHES ====================
         function renderCoaches() {
@@ -1033,9 +1092,9 @@
             btn.textContent = 'Submitting...';
             hideError();
 
-            // Gather data
-            const today = new Date();
-            const dateStr = `${(today.getMonth() + 1).toString().padStart(2, '0')}/${today.getDate().toString().padStart(2, '0')}/${today.getFullYear()}`;
+            // Gather data — use the date from the picker
+            const dateParts = document.getElementById('roll-date-input').value.split('-');
+            const dateStr = `${dateParts[1]}/${dateParts[2]}/${dateParts[0]}`;
 
             const coaches = Array.from(document.querySelectorAll('#coaches-list .checklist-item.checked'))
                 .map(item => item.querySelector('.name').textContent);
