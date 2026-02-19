@@ -412,6 +412,11 @@
             color: #e65100;
         }
 
+        .badge.social {
+            background: #e8f5e9;
+            color: #2e7d32;
+        }
+
         /* Date picker */
         .date-picker-bar {
             display: flex;
@@ -586,6 +591,10 @@
             background: #ffb74d;
         }
 
+        .breakdown-dot.social {
+            background: #81c784;
+        }
+
         .breakdown-text {
             font-size: 12px;
             color: rgba(255,255,255,0.6);
@@ -635,6 +644,11 @@
                         <span class="breakdown-text">Guests</span>
                         <span class="breakdown-num" id="total-guests-count">0</span>
                     </div>
+                    <div class="breakdown-item">
+                        <span class="breakdown-dot social"></span>
+                        <span class="breakdown-text">Social</span>
+                        <span class="breakdown-num" id="total-social-count">0</span>
+                    </div>
                 </div>
             </div>
         </div>
@@ -676,6 +690,7 @@
                 <select id="add-player-type" class="add-player-type">
                     <option value="M">Member</option>
                     <option value="G">Guest</option>
+                    <option value="S">Social</option>
                 </select>
                 <button class="add-player-btn" onclick="addPlayer()">+ Add</button>
             </div>
@@ -818,9 +833,10 @@
 
                 if (!lastName && !firstName) continue;
 
-                // Accept "G", "Guest", "M", "Member" (or anything else defaults to Member)
+                // Accept "G", "Guest", "S", "Social", "M", "Member" (or anything else defaults to Member)
                 const isGuest = rawStatus === 'G' || rawStatus === 'GUEST';
-                const status = isGuest ? 'G' : 'M';
+                const isSocial = rawStatus === 'S' || rawStatus === 'SOCIAL';
+                const status = isGuest ? 'G' : isSocial ? 'S' : 'M';
 
                 const displayName = firstName ? `${lastName}, ${firstName}` : lastName;
                 players.push({
@@ -842,6 +858,7 @@
             let totalJuniors = 0;
             let totalMembers = 0;
             let totalGuests = 0;
+            let totalSocial = 0;
 
             CLINICS.forEach(clinic => {
                 const players = rosterData[clinic.name] || [];
@@ -859,6 +876,7 @@
                 totalJuniors += players.length;
                 players.forEach(p => {
                     if (p.status === 'G') totalGuests++;
+                    else if (p.status === 'S') totalSocial++;
                     else totalMembers++;
                 });
             });
@@ -868,6 +886,7 @@
             document.getElementById('total-juniors-count').textContent = totalJuniors;
             document.getElementById('total-members-count').textContent = totalMembers;
             document.getElementById('total-guests-count').textContent = totalGuests;
+            document.getElementById('total-social-count').textContent = totalSocial;
             totalBar.style.display = '';
         }
 
@@ -976,6 +995,8 @@
             if (!selectedClinic.hideBadge) {
                 if (status === 'G') {
                     badgeHTML += '<span class="badge guest">Guest</span>';
+                } else if (status === 'S') {
+                    badgeHTML += '<span class="badge social">Social</span>';
                 } else {
                     badgeHTML += '<span class="badge member">Member</span>';
                 }
