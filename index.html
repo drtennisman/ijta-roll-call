@@ -676,6 +676,10 @@
 
             <div class="section-title">Coaches</div>
             <div id="coaches-list" class="checklist"></div>
+            <div class="add-player-bar">
+                <input type="text" id="add-coach-input" class="add-player-input" placeholder="Coach name (e.g. John)">
+                <button class="add-player-btn" onclick="addCoach()">+ Add</button>
+            </div>
 
             <div style="display:flex; justify-content:space-between; align-items:center;">
                 <div class="section-title">Players <span id="player-counter" class="counter"></span></div>
@@ -726,20 +730,9 @@
         ];
 
         // Google Apps Script Web App URL
-        let APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbz2i4kNaZorfM-7UJUefmcTGSWMKnHDckOca44VSG_vYai0UafjxHX2EMfGtU6n3jVP_A/exec';
+        let APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbw9KjYt-gIUtU9mqf_9WShnNQNO8ep5eRKYS_HIGAZExTxHlsqc6dC4dAx7IzB-NYzB/exec';
 
-        const COACHES = [
-            'Becca Mathis',
-            'Caleb Mathis',
-            'Ellis Zapalowski',
-            'J.C. Freeman',
-            'Joey Francis',
-            'John Lacy',
-            'Lake Blackiston',
-            'Matt Kendrick',
-            'Stephanie Heckler',
-            'Steve Prokop'
-        ];
+        let COACHES = [];  // Loaded dynamically from "Coaches" tab in roster spreadsheet
 
         // ==================== STATE ====================
         let rosterData = {};  // { clinicName: [ { name: "Last, First", status: "M"|"G" } ] }
@@ -748,6 +741,7 @@
         // ==================== INITIALIZATION ====================
         document.addEventListener('DOMContentLoaded', () => {
             loadAllRosters();
+            loadCoaches();
             checkAppsScriptUrl();
         });
 
@@ -784,6 +778,30 @@
             } catch (error) {
                 console.error(`Error loading ${clinic.tab}:`, error);
                 rosterData[clinic.name] = [];
+            }
+        }
+
+        async function loadCoaches() {
+            try {
+                const url = `https://docs.google.com/spreadsheets/d/${ROSTER_SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent('Coaches')}`;
+                const response = await fetch(url);
+                if (!response.ok) throw new Error('Failed to fetch Coaches');
+                const csvText = await response.text();
+                const lines = csvText.split('\n').filter(line => line.trim());
+                const coaches = [];
+                // Skip header row; only need column A (Coach Name)
+                for (let i = 1; i < lines.length; i++) {
+                    const cols = parseCSVRow(lines[i]);
+                    const name = (cols[0] || '').trim();
+                    if (name) {
+                        coaches.push(name);
+                    }
+                }
+                // Sort alphabetically
+                coaches.sort((a, b) => a.localeCompare(b));
+                COACHES = coaches;
+            } catch (error) {
+                console.error('Error loading coaches:', error);
             }
         }
 
@@ -899,8 +917,9 @@
         function showClinicScreen() {
             document.getElementById('clinic-screen').classList.add('active');
             document.getElementById('roll-screen').classList.remove('active');
-            // Refresh rosters each time we go back
+            // Refresh rosters and coaches each time we go back
             loadAllRosters();
+            loadCoaches();
         }
 
         function showRollScreen() {
@@ -917,7 +936,8 @@
             document.getElementById('roll-date-input').value = `${yyyy}-${mm}-${dd}`;
             updateHeaderDate();
 
-            // Clear the add-player input
+            // Clear the add inputs
+            document.getElementById('add-coach-input').value = '';
             document.getElementById('add-player-input').value = '';
 
             renderCoaches();
@@ -963,6 +983,40 @@
                 container.appendChild(item);
             });
         }
+
+        function addCoach() {
+            const input = document.getElementById('add-coach-input');
+            const name = input.value.trim();
+            if (!name) return;
+
+            const container = document.getElementById('coaches-list');
+            const item = document.createElement('div');
+            item.className = 'checklist-item checked';
+            item.innerHTML = `
+                <div class="checkbox"><span class="checkmark">&#10003;</span></div>
+                <span class="name">${name}</span>
+                <span class="added-tag">Added</span>
+            `;
+            item.onclick = () => {
+                item.classList.toggle('checked');
+                updateSubmitButton();
+            };
+            container.appendChild(item);
+
+            input.value = '';
+            updateSubmitButton();
+            container.lastChild.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+
+        // Allow Enter key to add coach
+        document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('add-coach-input').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    addCoach();
+                }
+            });
+        });
 
         // ==================== PLAYERS ====================
         function renderPlayers() {
