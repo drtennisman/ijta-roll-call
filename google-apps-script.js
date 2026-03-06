@@ -24,7 +24,7 @@ const ROSTER_SHEET_ID = '10nb7o9ZJ-fRyTnA2wosGa6OBCTZeEcGAKRAuCY7PZ8E';
 function doPost(e) {
   try {
     const data = JSON.parse(e.postData.contents);
-    const { date, clinic, clinicTab, coaches, players } = data;
+    const { date, clinic, clinicTab, coaches, players, newCoaches } = data;
 
     const ss = SpreadsheetApp.openById(ATTENDANCE_SHEET_ID);
     let sheet = ss.getSheetByName('Attendance');
@@ -71,8 +71,11 @@ function doPost(e) {
     // Auto-add new players to the master roster sheet
     const added = addNewPlayersToRoster(clinicTab, players);
 
+    // Auto-add new coaches to the Coaches tab
+    const coachesAdded = addNewCoachesToRoster(newCoaches || []);
+
     return ContentService
-      .createTextOutput(JSON.stringify({ success: true, playersRecorded: players.length, rosterAdded: added }))
+      .createTextOutput(JSON.stringify({ success: true, playersRecorded: players.length, rosterAdded: added, coachesAdded: coachesAdded }))
       .setMimeType(ContentService.MimeType.JSON);
 
   } catch (error) {
@@ -149,6 +152,205 @@ function addNewPlayersToRoster(clinicTab, players) {
 }
 
 // ============================================================
+// AUTO-ADD NEW COACHES TO ROSTER
+// ============================================================
+// When attendance is submitted, any coach marked as "Added"
+// gets appended to the Coaches tab if not already there.
+// ============================================================
+
+function addNewCoachesToRoster(newCoaches) {
+  if (!newCoaches || newCoaches.length === 0) return 0;
+
+  try {
+    const rosterSS = SpreadsheetApp.openById(ROSTER_SHEET_ID);
+    const sheet = rosterSS.getSheetByName('Coaches');
+    if (!sheet) return 0;
+
+    // Read existing coach names (column A)
+    const lastRow = sheet.getLastRow();
+    const existingNames = new Set();
+
+    if (lastRow > 1) {
+      const nameData = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+      for (const row of nameData) {
+        const name = (row[0] || '').toString().trim();
+        if (name) {
+          existingNames.add(name.toLowerCase());
+        }
+      }
+    }
+
+    let addedCount = 0;
+    for (const coach of newCoaches) {
+      const name = (coach || '').trim();
+      if (!name) continue;
+
+      if (!existingNames.has(name.toLowerCase())) {
+        sheet.appendRow([name]);
+        existingNames.add(name.toLowerCase());
+        addedCount++;
+      }
+    }
+
+    return addedCount;
+  } catch (error) {
+    Logger.log('Error adding coaches to roster: ' + error.toString());
+    return 0;
+  }
+}
+
+// ============================================================
+// SHARED HELPERS
+// ============================================================
+
+const BILLING_SHEET_ID = '1GXysHPQzxIRZnxPPnlnZksL-b7Vc2cIJamcgBR75-oI';
+
+/**
+ * Parse a date value from the spreadsheet (Date object or "MM/DD/YYYY" string).
+ * Returns a Date object, or null if unparseable.
+ */
+function parseDate(dateVal) {
+  if (dateVal instanceof Date) return dateVal;
+  const parts = String(dateVal).split('/');
+  if (parts.length === 3) {
+    return new Date(parseInt(parts[2]), parseInt(parts[0]) - 1, parseInt(parts[1]));
+  }
+  return null;
+}
+
+/**
+ * Read attendance rows for a given month/year.
+ * Returns an array of { date, clinic, playerName, status } objects.
+ */
+function getAttendanceForMonth(billingMonth, billingYear) {
+  const ss = SpreadsheetApp.openById(ATTENDANCE_SHEET_ID);
+  const sheet = ss.getSheetByName('Attendance');
+  if (!sheet) return [];
+
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return [];
+
+  const rows = [];
+  for (let i = 1; i < data.length; i++) {
+    const rowDate = parseDate(data[i][0]);
+    if (!rowDate) continue;
+
+    const clinic = data[i][1];
+    const playerName = data[i][3];
+    const status = data[i][4] || 'M';
+
+    if (!playerName || !clinic) continue;
+    if (rowDate.getMonth() + 1 !== billingMonth || rowDate.getFullYear() !== billingYear) continue;
+
+    rows.push({ date: rowDate, clinic: clinic, playerName: playerName, status: status });
+  }
+  return rows;
+}
+
+/**
+ * Read coach hourly rates from the "Coaches" tab in the roster spreadsheet.
+ * Returns an object: { "Coach Name": hourlyRate, ... }
+ */
+function getCoachRates() {
+  const rosterSS = SpreadsheetApp.openById(ROSTER_SHEET_ID);
+  const sheet = rosterSS.getSheetByName('Coaches');
+  if (!sheet) return {};
+
+  const data = sheet.getDataRange().getValues();
+  const rates = {};
+  // Skip header row
+  for (let i = 1; i < data.length; i++) {
+    const name = (data[i][0] || '').toString().trim();
+    // Strip $ signs, commas, spaces from rate (handles "$25", "$25.00", etc.)
+    const rawRate = (data[i][1] || '').toString().replace(/[$,\s]/g, '');
+    const rate = parseFloat(rawRate) || 0;
+    if (name) {
+      rates[name] = rate;
+    }
+  }
+  return rates;
+}
+
+/**
+ * Read clinic session durations from the "Clinic Config" tab in the roster spreadsheet.
+ * Returns an object: { "Clinic Display Name": sessionHours, ... }
+ */
+function getClinicSessionDurations() {
+  const rosterSS = SpreadsheetApp.openById(ROSTER_SHEET_ID);
+  const sheet = rosterSS.getSheetByName('Clinic Config');
+  if (!sheet) return {};
+
+  const data = sheet.getDataRange().getValues();
+  const durations = {};
+  // Skip header row
+  for (let i = 1; i < data.length; i++) {
+    const clinicName = (data[i][0] || '').toString().trim();
+    const rawHours = (data[i][1] || '').toString().replace(/[^0-9.]/g, '');
+    const hours = parseFloat(rawHours) || 0;
+    if (clinicName) {
+      durations[clinicName] = hours;
+    }
+  }
+  return durations;
+}
+
+/**
+ * Read attendance rows for a given month/year, INCLUDING coaches data.
+ * Returns:
+ * {
+ *   rows: [{ date, clinic, playerName, status }],
+ *   sessionCoaches: { "dateStr|||clinic": ["Coach1", "Coach2", ...] }
+ * }
+ *
+ * Coaches appear ONLY on the first row of each date+clinic session group (column C).
+ * De-duplicates coaches in case of multiple submissions for same date+clinic.
+ */
+function getAttendanceWithCoachesForMonth(billingMonth, billingYear) {
+  const ss = SpreadsheetApp.openById(ATTENDANCE_SHEET_ID);
+  const sheet = ss.getSheetByName('Attendance');
+  if (!sheet) return { rows: [], sessionCoaches: {} };
+
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return { rows: [], sessionCoaches: {} };
+
+  const rows = [];
+  const sessionCoaches = {};
+
+  for (let i = 1; i < data.length; i++) {
+    const rowDate = parseDate(data[i][0]);
+    if (!rowDate) continue;
+
+    const clinic = data[i][1];
+    const coachesStr = (data[i][2] || '').toString().trim();
+    const playerName = data[i][3];
+    const status = data[i][4] || 'M';
+
+    if (!playerName || !clinic) continue;
+    if (rowDate.getMonth() + 1 !== billingMonth || rowDate.getFullYear() !== billingYear) continue;
+
+    rows.push({ date: rowDate, clinic: clinic, playerName: playerName, status: status });
+
+    // Capture coaches for this session (date+clinic combo)
+    if (coachesStr) {
+      const dateStr = (rowDate.getMonth() + 1) + '/' + rowDate.getDate() + '/' + rowDate.getFullYear();
+      const sessionKey = dateStr + '|||' + clinic;
+      const newCoaches = coachesStr.split(', ').map(c => c.trim()).filter(c => c);
+      if (!sessionCoaches[sessionKey]) {
+        sessionCoaches[sessionKey] = [];
+      }
+      // De-duplicate coaches (handles multiple submissions for same session)
+      for (const c of newCoaches) {
+        if (!sessionCoaches[sessionKey].includes(c)) {
+          sessionCoaches[sessionKey].push(c);
+        }
+      }
+    }
+  }
+
+  return { rows, sessionCoaches };
+}
+
+// ============================================================
 // MONTHLY BILLING REPORT
 // ============================================================
 // Generates a billing summary in a separate Google Sheet.
@@ -156,28 +358,26 @@ function addNewPlayersToRoster(clinicTab, players) {
 // or set up a monthly trigger (Edit > Triggers).
 // ============================================================
 
-const BILLING_SHEET_ID = '1GXysHPQzxIRZnxPPnlnZksL-b7Vc2cIJamcgBR75-oI';
-
 // Pricing lookup tables — total charged for N sessions
 // Taken directly from the pricing spreadsheet
 const PRICING = {
-  'Red Ball (Ages 8 and Under)': {
+  'Red Ball': {
     M: [0, 15, 30, 45, 60, 75, 90, 90, 105, 120, 135],
     G: [0, 20, 40, 60, 80, 100, 120, 120, 140, 160, 180]
   },
-  'Orange Ball (Ages 10 and Under)': {
+  'Orange Ball': {
     M: [0, 15, 30, 45, 60, 75, 90, 90, 105, 120, 135],
     G: [0, 20, 40, 60, 80, 100, 120, 120, 140, 160, 180]
   },
-  'Green Ball (Ages 12 and Under)': {
+  'Green Ball': {
     M: [0, 20, 40, 60, 80, 100, 120, 140, 140, 160, 180],
     G: [0, 25, 50, 75, 100, 125, 150, 175, 175, 200, 225]
   },
-  'Middle School Yellow Ball Clinic (Ages 12-14)': {
+  'MS Yellow Ball': {
     M: [0, 25, 50, 75, 100, 125, 150, 175, 175, 200, 225],
     G: [0, 30, 60, 90, 120, 150, 180, 210, 210, 240, 270]
   },
-  'High School Yellow Ball Clinic (Ages 14 and Over)': {
+  'HS Yellow Ball': {
     M: [0, 25, 50, 75, 100, 125, 150, 175, 200, 200, 225, 250, 275, 300, 325, 350],
     G: [0, 30, 60, 90, 120, 150, 180, 210, 240, 240, 270, 300, 330, 360, 390, 420]
   },
@@ -189,11 +389,11 @@ const PRICING = {
 
 // Per-session rates for sessions beyond lookup table range
 const PER_SESSION_RATE = {
-  'Red Ball (Ages 8 and Under)':                      { M: 15, G: 20 },
-  'Orange Ball (Ages 10 and Under)':                   { M: 15, G: 20 },
-  'Green Ball (Ages 12 and Under)':                    { M: 20, G: 25 },
-  'Middle School Yellow Ball Clinic (Ages 12-14)':     { M: 25, G: 30 },
-  'High School Yellow Ball Clinic (Ages 14 and Over)': { M: 25, G: 30 },
+  'Red Ball':                                           { M: 15, G: 20 },
+  'Orange Ball':                                        { M: 15, G: 20 },
+  'Green Ball':                                         { M: 20, G: 25 },
+  'MS Yellow Ball':                                     { M: 25, G: 30 },
+  'HS Yellow Ball':                                     { M: 25, G: 30 },
   'Bruno':                                              { M: 20, G: 20 }
 };
 
@@ -215,60 +415,26 @@ function getTotalCharge(clinic, status, sessions) {
 }
 
 function generateMonthlyBilling(monthOverride, yearOverride) {
-  // Determine which month to bill for
   const now = new Date();
-  const billingMonth = monthOverride || now.getMonth() + 1; // 1-12
+  const billingMonth = monthOverride || now.getMonth() + 1;
   const billingYear = yearOverride || now.getFullYear();
 
   const monthName = new Date(billingYear, billingMonth - 1, 1)
     .toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
 
-  // Read attendance data
-  const ss = SpreadsheetApp.openById(ATTENDANCE_SHEET_ID);
-  const sheet = ss.getSheetByName('Attendance');
-  if (!sheet) {
-    Logger.log('No Attendance sheet found');
+  const attendanceRows = getAttendanceForMonth(billingMonth, billingYear);
+  if (attendanceRows.length === 0) {
+    Logger.log('No attendance data found for ' + monthName);
     return;
   }
 
-  const data = sheet.getDataRange().getValues();
-  if (data.length <= 1) {
-    Logger.log('No attendance data found');
-    return;
-  }
-
-  // Tally sessions per player per clinic for the billing month
-  // data[0] is the header row: [Date, Clinic, Coaches, Player Name, Status]
+  // Tally sessions per player per clinic
   const playerData = {}; // key: "PlayerName|||Clinic" -> { name, clinic, status, sessions }
 
-  for (let i = 1; i < data.length; i++) {
-    const dateVal = data[i][0];
-    const clinic = data[i][1];
-    const playerName = data[i][3];
-    const status = data[i][4] || 'M';
-
-    if (!playerName || !clinic) continue;
-
-    // Parse date — could be string "MM/DD/YYYY" or Date object
-    let rowDate;
-    if (dateVal instanceof Date) {
-      rowDate = dateVal;
-    } else {
-      const parts = String(dateVal).split('/');
-      if (parts.length === 3) {
-        rowDate = new Date(parseInt(parts[2]), parseInt(parts[0]) - 1, parseInt(parts[1]));
-      } else {
-        continue; // skip unparseable dates
-      }
-    }
-
-    if (rowDate.getMonth() + 1 !== billingMonth || rowDate.getFullYear() !== billingYear) {
-      continue; // not in billing month
-    }
-
-    const key = playerName + '|||' + clinic;
+  for (const row of attendanceRows) {
+    const key = row.playerName + '|||' + row.clinic;
     if (!playerData[key]) {
-      playerData[key] = { name: playerName, clinic: clinic, status: status, sessions: 0 };
+      playerData[key] = { name: row.playerName, clinic: row.clinic, status: row.status, sessions: 0 };
     }
     playerData[key].sessions++;
   }
@@ -314,7 +480,7 @@ function generateMonthlyBilling(monthOverride, yearOverride) {
 
   // Write to billing sheet
   const billingSS = SpreadsheetApp.openById(BILLING_SHEET_ID);
-  const tabName = monthName;
+  const tabName = 'Billing Summary - ' + monthName;
 
   // Delete existing tab for this month if it exists
   let billingSheet = billingSS.getSheetByName(tabName);
@@ -365,7 +531,7 @@ function generateMonthlyBilling(monthOverride, yearOverride) {
 
   // Set column widths
   billingSheet.setColumnWidth(1, 200);  // Player Name
-  billingSheet.setColumnWidth(2, 320);  // Clinic
+  billingSheet.setColumnWidth(2, 160);  // Clinic
   billingSheet.setColumnWidth(3, 80);   // Status
   billingSheet.setColumnWidth(4, 80);   // Sessions
   billingSheet.setColumnWidth(5, 120);  // Total Charged
@@ -385,6 +551,109 @@ function generateMonthlyBilling(monthOverride, yearOverride) {
   const totalRevenue = billingRows.reduce((sum, r) => sum + r.total, 0);
   billingSheet.getRange(summaryStartRow + 2, 2).setValue(totalRevenue);
   billingSheet.getRange(summaryStartRow + 2, 2).setNumberFormat('$#,##0.00');
+
+  // Per-clinic revenue breakdown
+  const clinicSummary = {};
+  for (const row of billingRows) {
+    if (!clinicSummary[row.clinic]) {
+      clinicSummary[row.clinic] = { players: 0, revenue: 0 };
+    }
+    clinicSummary[row.clinic].players++;
+    clinicSummary[row.clinic].revenue += row.total;
+  }
+
+  let clinicRow = summaryStartRow + 4;
+  billingSheet.getRange(clinicRow, 1).setValue('REVENUE BY CLINIC');
+  billingSheet.getRange(clinicRow, 1).setFontWeight('bold');
+  clinicRow++;
+
+  const clinicHeaders = ['Clinic', 'Players', 'Revenue'];
+  billingSheet.getRange(clinicRow, 1, 1, clinicHeaders.length).setValues([clinicHeaders]);
+  billingSheet.getRange(clinicRow, 1, 1, clinicHeaders.length).setFontWeight('bold');
+  clinicRow++;
+
+  const clinicNames = Object.keys(clinicSummary).sort();
+  for (const name of clinicNames) {
+    const cs = clinicSummary[name];
+    billingSheet.getRange(clinicRow, 1).setValue(name);
+    billingSheet.getRange(clinicRow, 2).setValue(cs.players);
+    billingSheet.getRange(clinicRow, 3).setValue(cs.revenue);
+    billingSheet.getRange(clinicRow, 3).setNumberFormat('$#,##0.00');
+    clinicRow++;
+  }
+
+  // Per-clinic billing tabs
+  for (const clinicName of clinicNames) {
+    const clinicTabName = clinicName + ' - Billing - ' + monthName;
+
+    let clinicBillingSheet = billingSS.getSheetByName(clinicTabName);
+    if (clinicBillingSheet) {
+      billingSS.deleteSheet(clinicBillingSheet);
+    }
+    clinicBillingSheet = billingSS.insertSheet(clinicTabName);
+
+    // Header row
+    const clinicBillingHeaders = ['Player Name', 'Status', 'Sessions', 'Total Charged', 'Sibling Discount Note'];
+    clinicBillingSheet.appendRow(clinicBillingHeaders);
+
+    const clinicHeaderRange = clinicBillingSheet.getRange(1, 1, 1, clinicBillingHeaders.length);
+    clinicHeaderRange.setFontWeight('bold');
+    clinicHeaderRange.setBackground('#2e7d32');
+    clinicHeaderRange.setFontColor('white');
+
+    // Filter billing rows for this clinic
+    const clinicBillingRows = billingRows.filter(r => r.clinic === clinicName);
+
+    for (const row of clinicBillingRows) {
+      const siblingNote = siblingLastNames[row.lastName]
+        ? 'CHECK FOR SIBLING DISCOUNT'
+        : '';
+
+      clinicBillingSheet.appendRow([
+        row.name,
+        row.status,
+        row.sessions,
+        row.total,
+        siblingNote
+      ]);
+    }
+
+    // Format total column as currency
+    if (clinicBillingRows.length > 0) {
+      const clinicTotalRange = clinicBillingSheet.getRange(2, 4, clinicBillingRows.length, 1);
+      clinicTotalRange.setNumberFormat('$#,##0.00');
+
+      // Highlight sibling discount rows in yellow
+      for (let i = 0; i < clinicBillingRows.length; i++) {
+        if (siblingLastNames[clinicBillingRows[i].lastName]) {
+          const rowRange = clinicBillingSheet.getRange(i + 2, 1, 1, clinicBillingHeaders.length);
+          rowRange.setBackground('#fff9c4');
+        }
+      }
+    }
+
+    // Set column widths
+    clinicBillingSheet.setColumnWidth(1, 200);  // Player Name
+    clinicBillingSheet.setColumnWidth(2, 80);   // Status
+    clinicBillingSheet.setColumnWidth(3, 80);   // Sessions
+    clinicBillingSheet.setColumnWidth(4, 120);  // Total Charged
+    clinicBillingSheet.setColumnWidth(5, 250);  // Sibling Note
+
+    // Freeze header
+    clinicBillingSheet.setFrozenRows(1);
+
+    // Summary at bottom
+    const clinicSummaryRow = clinicBillingRows.length + 3;
+    clinicBillingSheet.getRange(clinicSummaryRow, 1).setValue('SUMMARY');
+    clinicBillingSheet.getRange(clinicSummaryRow, 1).setFontWeight('bold');
+    clinicBillingSheet.getRange(clinicSummaryRow + 1, 1).setValue('Total Players:');
+    clinicBillingSheet.getRange(clinicSummaryRow + 1, 2).setValue(clinicBillingRows.length);
+    clinicBillingSheet.getRange(clinicSummaryRow + 2, 1).setValue('Total Revenue:');
+
+    const clinicTotalRevenue = clinicBillingRows.reduce((sum, r) => sum + r.total, 0);
+    clinicBillingSheet.getRange(clinicSummaryRow + 2, 2).setValue(clinicTotalRevenue);
+    clinicBillingSheet.getRange(clinicSummaryRow + 2, 2).setNumberFormat('$#,##0.00');
+  }
 
   Logger.log('Billing report generated for ' + monthName + ': ' + billingRows.length + ' line items, $' + totalRevenue + ' total');
 }
@@ -408,10 +677,454 @@ function generateLastMonthBilling() {
 }
 
 // ============================================================
+// ATTENDANCE SUMMARY REPORT
+// ============================================================
+// Generates a separate attendance summary with one tab per clinic.
+// Each tab shows date-by-date attendance with player names,
+// plus totals and revenue for easy cross-checking before billing.
+// ============================================================
+
+function generateAttendanceSummary(monthOverride, yearOverride) {
+  const now = new Date();
+  const billingMonth = monthOverride || now.getMonth() + 1;
+  const billingYear = yearOverride || now.getFullYear();
+
+  const monthName = new Date(billingYear, billingMonth - 1, 1)
+    .toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+
+  const attendanceRows = getAttendanceForMonth(billingMonth, billingYear);
+  if (attendanceRows.length === 0) {
+    Logger.log('No attendance data found for ' + monthName);
+    return;
+  }
+
+  // Organize data by clinic -> date -> list of player names
+  const clinicData = {};
+
+  for (const row of attendanceRows) {
+    const dateStr = (row.date.getMonth() + 1) + '/' + row.date.getDate() + '/' + row.date.getFullYear();
+
+    if (!clinicData[row.clinic]) {
+      clinicData[row.clinic] = { dates: {}, playerStatus: {}, dateObjects: {} };
+    }
+    if (!clinicData[row.clinic].dates[dateStr]) {
+      clinicData[row.clinic].dates[dateStr] = [];
+      clinicData[row.clinic].dateObjects[dateStr] = row.date;
+    }
+    clinicData[row.clinic].dates[dateStr].push(row.playerName);
+    clinicData[row.clinic].playerStatus[row.playerName] = row.status;
+  }
+
+  // Write to billing spreadsheet
+  const billingSS = SpreadsheetApp.openById(BILLING_SHEET_ID);
+
+  for (const clinic in clinicData) {
+    const cd = clinicData[clinic];
+    const tabName = clinic + ' - Attendance - ' + monthName;
+
+    // Delete existing tab if it exists
+    let clinicSheet = billingSS.getSheetByName(tabName);
+    if (clinicSheet) {
+      billingSS.deleteSheet(clinicSheet);
+    }
+    clinicSheet = billingSS.insertSheet(tabName);
+
+    // Title
+    clinicSheet.getRange(1, 1).setValue(clinic + ' — Attendance Summary — ' + monthName);
+    clinicSheet.getRange(1, 1).setFontWeight('bold');
+    clinicSheet.getRange(1, 1).setFontSize(12);
+
+    // Headers
+    const headers = ['Date', 'Players Present', 'Player Names'];
+    clinicSheet.getRange(3, 1, 1, headers.length).setValues([headers]);
+    clinicSheet.getRange(3, 1, 1, headers.length).setFontWeight('bold');
+    clinicSheet.getRange(3, 1, 1, headers.length).setBackground('#2e7d32');
+    clinicSheet.getRange(3, 1, 1, headers.length).setFontColor('white');
+
+    // Sort dates chronologically
+    const sortedDates = Object.keys(cd.dates).sort((a, b) => {
+      return cd.dateObjects[a] - cd.dateObjects[b];
+    });
+
+    let currentRow = 4;
+    let totalCheckIns = 0;
+
+    for (const dateStr of sortedDates) {
+      const players = cd.dates[dateStr].sort();
+      totalCheckIns += players.length;
+      clinicSheet.getRange(currentRow, 1).setValue(dateStr);
+      clinicSheet.getRange(currentRow, 2).setValue(players.length);
+      clinicSheet.getRange(currentRow, 3).setValue(players.join('; '));
+      currentRow++;
+    }
+
+    // Summary section
+    const uniquePlayers = [...new Set(Object.keys(cd.dates).flatMap(d => cd.dates[d]))];
+    currentRow += 1;
+    clinicSheet.getRange(currentRow, 1).setValue('SUMMARY');
+    clinicSheet.getRange(currentRow, 1).setFontWeight('bold');
+    currentRow++;
+    clinicSheet.getRange(currentRow, 1).setValue('Total Sessions:');
+    clinicSheet.getRange(currentRow, 2).setValue(sortedDates.length);
+    currentRow++;
+    clinicSheet.getRange(currentRow, 1).setValue('Total Check-ins:');
+    clinicSheet.getRange(currentRow, 2).setValue(totalCheckIns);
+    currentRow++;
+    clinicSheet.getRange(currentRow, 1).setValue('Unique Players:');
+    clinicSheet.getRange(currentRow, 2).setValue(uniquePlayers.length);
+    currentRow++;
+
+    // Calculate revenue for this clinic
+    let clinicRevenue = 0;
+    const playerSessions = {};
+    for (const dateStr of sortedDates) {
+      for (const player of cd.dates[dateStr]) {
+        playerSessions[player] = (playerSessions[player] || 0) + 1;
+      }
+    }
+    for (const player in playerSessions) {
+      const status = cd.playerStatus[player] || 'M';
+      clinicRevenue += getTotalCharge(clinic, status, playerSessions[player]);
+    }
+
+    clinicSheet.getRange(currentRow, 1).setValue('Total Revenue:');
+    clinicSheet.getRange(currentRow, 2).setValue(clinicRevenue);
+    clinicSheet.getRange(currentRow, 2).setNumberFormat('$#,##0.00');
+
+    // Set column widths
+    clinicSheet.setColumnWidth(1, 120);
+    clinicSheet.setColumnWidth(2, 120);
+    clinicSheet.setColumnWidth(3, 600);
+
+    // Freeze header rows
+    clinicSheet.setFrozenRows(3);
+
+    Logger.log('Attendance summary generated for ' + clinic + ': ' + sortedDates.length + ' dates, ' + uniquePlayers.length + ' unique players, $' + clinicRevenue);
+  }
+}
+
+function generateCurrentMonthAttendanceSummary() {
+  const now = new Date();
+  generateAttendanceSummary(now.getMonth() + 1, now.getFullYear());
+}
+
+function generateLastMonthAttendanceSummary() {
+  const now = new Date();
+  let month = now.getMonth();
+  let year = now.getFullYear();
+  if (month === 0) {
+    month = 12;
+    year--;
+  }
+  generateAttendanceSummary(month, year);
+}
+
+// ============================================================
+// ATTENDANCE & STAFFING (A/S) SUMMARY REPORT
+// ============================================================
+// Generates per-clinic tabs showing attendance data alongside
+// staffing costs and net profit calculations.
+// Revenue - Staffing = Net Profit
+// ============================================================
+
+function generateAttendanceAndStaffingSummary(monthOverride, yearOverride) {
+  const now = new Date();
+  const billingMonth = monthOverride || now.getMonth() + 1;
+  const billingYear = yearOverride || now.getFullYear();
+
+  const monthName = new Date(billingYear, billingMonth - 1, 1)
+    .toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+
+  // Get attendance data WITH coaches
+  const { rows: attendanceRows, sessionCoaches } =
+    getAttendanceWithCoachesForMonth(billingMonth, billingYear);
+
+  if (attendanceRows.length === 0) {
+    Logger.log('No attendance data found for A/S summary: ' + monthName);
+    return;
+  }
+
+  // Read config data from roster spreadsheet
+  const coachRates = getCoachRates();
+  const sessionDurations = getClinicSessionDurations();
+
+  // Organize data by clinic
+  const clinicData = {};
+
+  for (const row of attendanceRows) {
+    const dateStr = (row.date.getMonth() + 1) + '/' + row.date.getDate() + '/' + row.date.getFullYear();
+
+    if (!clinicData[row.clinic]) {
+      clinicData[row.clinic] = {
+        dates: {},
+        dateObjects: {},
+        playerStatus: {},
+        coachesByDate: {}
+      };
+    }
+    const cd = clinicData[row.clinic];
+
+    if (!cd.dates[dateStr]) {
+      cd.dates[dateStr] = [];
+      cd.dateObjects[dateStr] = row.date;
+    }
+    cd.dates[dateStr].push(row.playerName);
+    cd.playerStatus[row.playerName] = row.status;
+
+    // Map coaches to this clinic+date
+    const sessionKey = dateStr + '|||' + row.clinic;
+    if (sessionCoaches[sessionKey]) {
+      cd.coachesByDate[dateStr] = sessionCoaches[sessionKey];
+    }
+  }
+
+  // Write to billing spreadsheet
+  const billingSS = SpreadsheetApp.openById(BILLING_SHEET_ID);
+
+  for (const clinic in clinicData) {
+    const cd = clinicData[clinic];
+    const tabName = clinic + ' - A/S Summary - ' + monthName;
+
+    // Delete existing tab if it exists
+    let sheet = billingSS.getSheetByName(tabName);
+    if (sheet) {
+      billingSS.deleteSheet(sheet);
+    }
+    sheet = billingSS.insertSheet(tabName);
+
+    const sessionHours = sessionDurations[clinic] || 1;
+
+    // === SECTION 1: ATTENDANCE BY DATE ===
+    sheet.getRange(1, 1).setValue(clinic + ' \u2014 Attendance & Staffing Summary \u2014 ' + monthName);
+    sheet.getRange(1, 1).setFontWeight('bold');
+    sheet.getRange(1, 1).setFontSize(12);
+
+    const attendanceHeaders = ['Date', 'Players', 'Coaches Present', 'Player Names'];
+    sheet.getRange(3, 1, 1, attendanceHeaders.length).setValues([attendanceHeaders]);
+    sheet.getRange(3, 1, 1, attendanceHeaders.length).setFontWeight('bold');
+    sheet.getRange(3, 1, 1, attendanceHeaders.length).setBackground('#2e7d32');
+    sheet.getRange(3, 1, 1, attendanceHeaders.length).setFontColor('white');
+
+    // Sort dates chronologically
+    const sortedDates = Object.keys(cd.dates).sort((a, b) =>
+      cd.dateObjects[a] - cd.dateObjects[b]
+    );
+
+    let currentRow = 4;
+    let totalCheckIns = 0;
+
+    // Track total sessions each coach worked for this clinic
+    const coachSessionCount = {};
+
+    for (const dateStr of sortedDates) {
+      const players = cd.dates[dateStr].sort();
+      totalCheckIns += players.length;
+
+      const dateCoaches = cd.coachesByDate[dateStr] || [];
+      const coachesDisplay = dateCoaches.join(', ') || '(none recorded)';
+
+      sheet.getRange(currentRow, 1).setValue(dateStr);
+      sheet.getRange(currentRow, 2).setValue(players.length);
+      sheet.getRange(currentRow, 3).setValue(coachesDisplay);
+      sheet.getRange(currentRow, 4).setValue(players.join('; '));
+
+      // Tally coach sessions
+      for (const coach of dateCoaches) {
+        coachSessionCount[coach] = (coachSessionCount[coach] || 0) + 1;
+      }
+      currentRow++;
+    }
+
+    // Attendance summary row
+    const uniquePlayers = [...new Set(Object.keys(cd.dates).flatMap(d => cd.dates[d]))];
+    currentRow++;
+    sheet.getRange(currentRow, 1).setValue('Total Sessions: ' + sortedDates.length);
+    sheet.getRange(currentRow, 1).setFontWeight('bold');
+    sheet.getRange(currentRow, 2).setValue('Check-ins: ' + totalCheckIns);
+    sheet.getRange(currentRow, 3).setValue('Unique Players: ' + uniquePlayers.length);
+    currentRow += 2;
+
+    // === SECTION 2: REVENUE ===
+    sheet.getRange(currentRow, 1).setValue('REVENUE');
+    sheet.getRange(currentRow, 1).setFontWeight('bold');
+    sheet.getRange(currentRow, 1).setFontSize(11);
+    currentRow++;
+
+    const revenueHeaders = ['Player', 'Status', 'Sessions', 'Total Charged'];
+    sheet.getRange(currentRow, 1, 1, revenueHeaders.length).setValues([revenueHeaders]);
+    sheet.getRange(currentRow, 1, 1, revenueHeaders.length).setFontWeight('bold');
+    sheet.getRange(currentRow, 1, 1, revenueHeaders.length).setBackground('#1565c0');
+    sheet.getRange(currentRow, 1, 1, revenueHeaders.length).setFontColor('white');
+    currentRow++;
+
+    // Calculate per-player revenue
+    const playerSessions = {};
+    for (const dateStr of sortedDates) {
+      for (const player of cd.dates[dateStr]) {
+        playerSessions[player] = (playerSessions[player] || 0) + 1;
+      }
+    }
+
+    let totalRevenue = 0;
+    const playerNames = Object.keys(playerSessions).sort();
+    const revenueStartRow = currentRow;
+
+    for (const player of playerNames) {
+      const status = cd.playerStatus[player] || 'M';
+      const sessions = playerSessions[player];
+      const charge = getTotalCharge(clinic, status, sessions);
+      totalRevenue += charge;
+
+      const statusLabel = status === 'G' ? 'Guest' : status === 'S' ? 'Social' : 'Member';
+
+      sheet.getRange(currentRow, 1).setValue(player);
+      sheet.getRange(currentRow, 2).setValue(statusLabel);
+      sheet.getRange(currentRow, 3).setValue(sessions);
+      sheet.getRange(currentRow, 4).setValue(charge);
+      currentRow++;
+    }
+
+    // Format charges as currency
+    if (playerNames.length > 0) {
+      sheet.getRange(revenueStartRow, 4, playerNames.length, 1).setNumberFormat('$#,##0.00');
+    }
+
+    // Total revenue row
+    sheet.getRange(currentRow, 1).setValue('TOTAL REVENUE');
+    sheet.getRange(currentRow, 1).setFontWeight('bold');
+    sheet.getRange(currentRow, 4).setValue(totalRevenue);
+    sheet.getRange(currentRow, 4).setNumberFormat('$#,##0.00');
+    sheet.getRange(currentRow, 4).setFontWeight('bold');
+    currentRow += 2;
+
+    // === SECTION 3: STAFFING COSTS ===
+    sheet.getRange(currentRow, 1).setValue('STAFFING');
+    sheet.getRange(currentRow, 1).setFontWeight('bold');
+    sheet.getRange(currentRow, 1).setFontSize(11);
+    currentRow++;
+
+    const staffingHeaders = ['Coach', 'Sessions', 'Hours/Session', 'Total Hours', 'Rate ($/hr)', 'Total Cost'];
+    sheet.getRange(currentRow, 1, 1, staffingHeaders.length).setValues([staffingHeaders]);
+    sheet.getRange(currentRow, 1, 1, staffingHeaders.length).setFontWeight('bold');
+    sheet.getRange(currentRow, 1, 1, staffingHeaders.length).setBackground('#e65100');
+    sheet.getRange(currentRow, 1, 1, staffingHeaders.length).setFontColor('white');
+    currentRow++;
+
+    let totalStaffingCost = 0;
+    const coachNames = Object.keys(coachSessionCount).sort();
+    const staffingStartRow = currentRow;
+
+    for (const coach of coachNames) {
+      const sessions = coachSessionCount[coach];
+      const rate = coachRates[coach] || 0;
+      const totalHours = sessions * sessionHours;
+      const cost = totalHours * rate;
+      totalStaffingCost += cost;
+
+      sheet.getRange(currentRow, 1).setValue(coach);
+      sheet.getRange(currentRow, 2).setValue(sessions);
+      sheet.getRange(currentRow, 3).setValue(sessionHours);
+      sheet.getRange(currentRow, 4).setValue(totalHours);
+      sheet.getRange(currentRow, 5).setValue(rate);
+      sheet.getRange(currentRow, 6).setValue(cost);
+      currentRow++;
+    }
+
+    // Format currency columns
+    if (coachNames.length > 0) {
+      sheet.getRange(staffingStartRow, 5, coachNames.length, 1).setNumberFormat('$#,##0.00');
+      sheet.getRange(staffingStartRow, 6, coachNames.length, 1).setNumberFormat('$#,##0.00');
+    }
+
+    // Total staffing cost row
+    sheet.getRange(currentRow, 1).setValue('TOTAL STAFFING COST');
+    sheet.getRange(currentRow, 1).setFontWeight('bold');
+    sheet.getRange(currentRow, 6).setValue(totalStaffingCost);
+    sheet.getRange(currentRow, 6).setNumberFormat('$#,##0.00');
+    sheet.getRange(currentRow, 6).setFontWeight('bold');
+    currentRow += 2;
+
+    // === SECTION 4: NET PROFIT ===
+    const netProfit = totalRevenue - totalStaffingCost;
+
+    sheet.getRange(currentRow, 1).setValue('NET PROFIT');
+    sheet.getRange(currentRow, 1).setFontWeight('bold');
+    sheet.getRange(currentRow, 1).setFontSize(12);
+    sheet.getRange(currentRow, 2).setValue(netProfit);
+    sheet.getRange(currentRow, 2).setNumberFormat('$#,##0.00');
+    sheet.getRange(currentRow, 2).setFontWeight('bold');
+    sheet.getRange(currentRow, 2).setFontSize(12);
+
+    // Color net profit green if positive, red if negative
+    if (netProfit >= 0) {
+      sheet.getRange(currentRow, 2).setFontColor('#2e7d32');
+    } else {
+      sheet.getRange(currentRow, 2).setFontColor('#c62828');
+    }
+
+    // Set column widths
+    sheet.setColumnWidth(1, 180);
+    sheet.setColumnWidth(2, 100);
+    sheet.setColumnWidth(3, 180);
+    sheet.setColumnWidth(4, 400);
+    sheet.setColumnWidth(5, 100);
+    sheet.setColumnWidth(6, 120);
+
+    // Freeze header rows
+    sheet.setFrozenRows(3);
+
+    Logger.log('A/S Summary generated for ' + clinic + ': Revenue=$' + totalRevenue +
+      ', Staffing=$' + totalStaffingCost + ', Net=$' + netProfit);
+  }
+}
+
+function generateCurrentMonthASSummary() {
+  const now = new Date();
+  generateAttendanceAndStaffingSummary(now.getMonth() + 1, now.getFullYear());
+}
+
+function generateLastMonthASSummary() {
+  const now = new Date();
+  let month = now.getMonth();
+  let year = now.getFullYear();
+  if (month === 0) {
+    month = 12;
+    year--;
+  }
+  generateAttendanceAndStaffingSummary(month, year);
+}
+
+// ============================================================
+// GENERATE ALL REPORTS (billing + attendance + A/S summary)
+// ============================================================
+
+function generateAllReports(monthOverride, yearOverride) {
+  generateMonthlyBilling(monthOverride, yearOverride);
+  generateAttendanceSummary(monthOverride, yearOverride);
+  generateAttendanceAndStaffingSummary(monthOverride, yearOverride);
+}
+
+function generateCurrentMonthAllReports() {
+  const now = new Date();
+  generateAllReports(now.getMonth() + 1, now.getFullYear());
+}
+
+function generateLastMonthAllReports() {
+  const now = new Date();
+  let month = now.getMonth();
+  let year = now.getFullYear();
+  if (month === 0) {
+    month = 12;
+    year--;
+  }
+  generateAllReports(month, year);
+}
+
+// ============================================================
 // AUTOMATIC MONTHLY TRIGGER
 // ============================================================
 // Run setupMonthlyTrigger() once from the Apps Script editor.
-// It will schedule generateLastMonthBilling to run automatically
+// It will schedule generateLastMonthAllReports to run automatically
 // on the 1st of every month between midnight and 1am.
 // ============================================================
 
@@ -419,17 +1132,18 @@ function setupMonthlyTrigger() {
   // Remove any existing billing triggers to avoid duplicates
   const triggers = ScriptApp.getProjectTriggers();
   for (const trigger of triggers) {
-    if (trigger.getHandlerFunction() === 'generateLastMonthBilling') {
+    const fn = trigger.getHandlerFunction();
+    if (fn === 'generateLastMonthBilling' || fn === 'generateLastMonthAllReports') {
       ScriptApp.deleteTrigger(trigger);
     }
   }
 
   // Create a new monthly trigger — runs on the 1st of each month
-  ScriptApp.newTrigger('generateLastMonthBilling')
+  ScriptApp.newTrigger('generateLastMonthAllReports')
     .timeBased()
     .onMonthDay(1)
     .atHour(0)
     .create();
 
-  Logger.log('Monthly billing trigger set up — will run on the 1st of each month');
+  Logger.log('Monthly trigger set up — billing + attendance summary will run on the 1st of each month');
 }

@@ -1172,7 +1172,11 @@
             const dateParts = document.getElementById('roll-date-input').value.split('-');
             const dateStr = `${dateParts[1]}/${dateParts[2]}/${dateParts[0]}`;
 
-            const coaches = Array.from(document.querySelectorAll('#coaches-list .checklist-item.checked'))
+            const coachItems = document.querySelectorAll('#coaches-list .checklist-item.checked');
+            const coaches = Array.from(coachItems)
+                .map(item => item.querySelector('.name').textContent);
+            const newCoaches = Array.from(coachItems)
+                .filter(item => item.querySelector('.added-tag'))
                 .map(item => item.querySelector('.name').textContent);
 
             const checkedItems = document.querySelectorAll('#players-list .checklist-item.checked');
@@ -1186,6 +1190,7 @@
                 clinic: selectedClinic.display,
                 clinicTab: selectedClinic.tab,
                 coaches: coaches,
+                newCoaches: newCoaches,
                 players: players
             };
 
