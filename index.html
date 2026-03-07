@@ -191,23 +191,6 @@
             flex-grow: 1;
         }
 
-        /* Select All */
-        .select-all-bar {
-            display: flex;
-            justify-content: flex-end;
-            margin-bottom: 6px;
-        }
-
-        .select-all-btn {
-            font-size: 13px;
-            color: #021f3d;
-            background: none;
-            border: none;
-            cursor: pointer;
-            font-weight: 600;
-            padding: 4px 0;
-        }
-
         /* Back button */
         .back-btn {
             display: inline-flex;
@@ -709,12 +692,7 @@
                 </div>
             </div>
 
-            <div style="display:flex; justify-content:space-between; align-items:center;">
-                <div class="section-title">Players <span id="player-counter" class="counter"></span></div>
-                <div class="select-all-bar">
-                    <button class="select-all-btn" onclick="toggleSelectAllPlayers()">Select All</button>
-                </div>
-            </div>
+            <div class="section-title">Players <span id="player-counter" class="counter"></span></div>
             <div id="players-list" class="checklist"></div>
 
             <div class="add-player-bar">
@@ -1163,22 +1141,6 @@
             const items = document.querySelectorAll('#players-list .checklist-item');
             const checked = document.querySelectorAll('#players-list .checklist-item.checked');
             document.getElementById('player-counter').textContent = `(${checked.length}/${items.length})`;
-        }
-
-        function toggleSelectAllPlayers() {
-            const items = document.querySelectorAll('#players-list .checklist-item');
-            const allChecked = Array.from(items).every(item => item.classList.contains('checked'));
-
-            items.forEach(item => {
-                if (allChecked) {
-                    item.classList.remove('checked');
-                } else {
-                    item.classList.add('checked');
-                }
-            });
-
-            updatePlayerCounter();
-            updateSubmitButton();
         }
 
         // ==================== SUBMIT ====================
