@@ -454,6 +454,28 @@
             border-color: #021f3d;
         }
 
+        /* No Staffing checkbox */
+        .no-staffing-label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 0 4px 0;
+            font-size: 15px;
+            color: #555;
+            cursor: pointer;
+        }
+
+        .no-staffing-label input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+        }
+
+        #coaches-section.disabled {
+            opacity: 0.3;
+            pointer-events: none;
+        }
+
         /* Add player section */
         .add-player-bar {
             display: flex;
@@ -675,10 +697,16 @@
             </div>
 
             <div class="section-title">Coaches</div>
-            <div id="coaches-list" class="checklist"></div>
-            <div class="add-player-bar">
-                <input type="text" id="add-coach-input" class="add-player-input" placeholder="Coach name (e.g. John)">
-                <button class="add-player-btn" onclick="addCoach()">+ Add</button>
+            <label class="no-staffing-label">
+                <input type="checkbox" id="no-staffing-checkbox" onchange="toggleNoStaffing()">
+                <span>No Staffing</span>
+            </label>
+            <div id="coaches-section">
+                <div id="coaches-list" class="checklist"></div>
+                <div class="add-player-bar">
+                    <input type="text" id="add-coach-input" class="add-player-input" placeholder="Coach name (e.g. John)">
+                    <button class="add-player-btn" onclick="addCoach()">+ Add</button>
+                </div>
             </div>
 
             <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -936,9 +964,11 @@
             document.getElementById('roll-date-input').value = `${yyyy}-${mm}-${dd}`;
             updateHeaderDate();
 
-            // Clear the add inputs
+            // Clear the add inputs and reset No Staffing
             document.getElementById('add-coach-input').value = '';
             document.getElementById('add-player-input').value = '';
+            document.getElementById('no-staffing-checkbox').checked = false;
+            document.getElementById('coaches-section').classList.remove('disabled');
 
             renderCoaches();
             renderPlayers();
@@ -982,6 +1012,22 @@
                 };
                 container.appendChild(item);
             });
+        }
+
+        function toggleNoStaffing() {
+            const checked = document.getElementById('no-staffing-checkbox').checked;
+            const section = document.getElementById('coaches-section');
+
+            if (checked) {
+                // Gray out coaches and uncheck all
+                section.classList.add('disabled');
+                document.querySelectorAll('#coaches-list .checklist-item.checked').forEach(item => {
+                    item.classList.remove('checked');
+                });
+            } else {
+                section.classList.remove('disabled');
+            }
+            updateSubmitButton();
         }
 
         function addCoach() {
@@ -1137,11 +1183,12 @@
 
         // ==================== SUBMIT ====================
         function updateSubmitButton() {
+            const noStaffing = document.getElementById('no-staffing-checkbox').checked;
             const coaches = document.querySelectorAll('#coaches-list .checklist-item.checked');
             const players = document.querySelectorAll('#players-list .checklist-item.checked');
             const btn = document.getElementById('submit-btn');
 
-            if (coaches.length === 0) {
+            if (!noStaffing && coaches.length === 0) {
                 btn.disabled = true;
                 btn.textContent = 'Select at least one coach';
             } else if (players.length === 0) {
@@ -1172,12 +1219,20 @@
             const dateParts = document.getElementById('roll-date-input').value.split('-');
             const dateStr = `${dateParts[1]}/${dateParts[2]}/${dateParts[0]}`;
 
-            const coachItems = document.querySelectorAll('#coaches-list .checklist-item.checked');
-            const coaches = Array.from(coachItems)
-                .map(item => item.querySelector('.name').textContent);
-            const newCoaches = Array.from(coachItems)
-                .filter(item => item.querySelector('.added-tag'))
-                .map(item => item.querySelector('.name').textContent);
+            const noStaffing = document.getElementById('no-staffing-checkbox').checked;
+            let coaches, newCoaches;
+
+            if (noStaffing) {
+                coaches = ['No Staffing'];
+                newCoaches = [];
+            } else {
+                const coachItems = document.querySelectorAll('#coaches-list .checklist-item.checked');
+                coaches = Array.from(coachItems)
+                    .map(item => item.querySelector('.name').textContent);
+                newCoaches = Array.from(coachItems)
+                    .filter(item => item.querySelector('.added-tag'))
+                    .map(item => item.querySelector('.name').textContent);
+            }
 
             const checkedItems = document.querySelectorAll('#players-list .checklist-item.checked');
             const players = Array.from(checkedItems).map(item => ({
