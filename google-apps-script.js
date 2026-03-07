@@ -21,17 +21,32 @@
 const ATTENDANCE_SHEET_ID = '1ipQEh5KCRywBOin8GM4xjzvGh9iK1YWp8VD9BXGH_YA';
 const ROSTER_SHEET_ID = '10nb7o9ZJ-fRyTnA2wosGa6OBCTZeEcGAKRAuCY7PZ8E';
 
+/**
+ * Convert a date string ("MM/DD/YYYY") into a month tab name (e.g. "March 2026").
+ */
+function getMonthTabName(dateStr) {
+  const parts = dateStr.split('/');
+  const month = parseInt(parts[0]);
+  const year = parseInt(parts[2]);
+  const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December'];
+  return monthNames[month - 1] + ' ' + year;
+}
+
 function doPost(e) {
   try {
     const data = JSON.parse(e.postData.contents);
     const { date, clinic, clinicTab, coaches, players, newCoaches } = data;
 
     const ss = SpreadsheetApp.openById(ATTENDANCE_SHEET_ID);
-    let sheet = ss.getSheetByName('Attendance');
 
-    // Create the Attendance sheet with headers if it doesn't exist
+    // Determine the month tab name from the submitted date (e.g. "March 2026")
+    const tabName = getMonthTabName(date);
+    let sheet = ss.getSheetByName(tabName);
+
+    // Create the month tab with headers if it doesn't exist
     if (!sheet) {
-      sheet = ss.insertSheet('Attendance');
+      sheet = ss.insertSheet(tabName);
       sheet.appendRow(['Date', 'Clinic', 'Coaches', 'Player Name', 'Status']);
 
       // Format header row
@@ -220,29 +235,43 @@ function parseDate(dateVal) {
 
 /**
  * Read attendance rows for a given month/year.
+ * Checks the month-specific tab first (e.g. "March 2026"),
+ * then falls back to the old "Attendance" tab for historical data.
  * Returns an array of { date, clinic, playerName, status } objects.
  */
 function getAttendanceForMonth(billingMonth, billingYear) {
   const ss = SpreadsheetApp.openById(ATTENDANCE_SHEET_ID);
-  const sheet = ss.getSheetByName('Attendance');
-  if (!sheet) return [];
+  const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December'];
+  const monthTabName = monthNames[billingMonth - 1] + ' ' + billingYear;
 
-  const data = sheet.getDataRange().getValues();
-  if (data.length <= 1) return [];
+  // Collect sheets to read from: month-specific tab first, then legacy "Attendance"
+  const sheetsToRead = [];
+  const monthSheet = ss.getSheetByName(monthTabName);
+  if (monthSheet) sheetsToRead.push(monthSheet);
+  const legacySheet = ss.getSheetByName('Attendance');
+  if (legacySheet) sheetsToRead.push(legacySheet);
+
+  if (sheetsToRead.length === 0) return [];
 
   const rows = [];
-  for (let i = 1; i < data.length; i++) {
-    const rowDate = parseDate(data[i][0]);
-    if (!rowDate) continue;
+  for (const sheet of sheetsToRead) {
+    const data = sheet.getDataRange().getValues();
+    if (data.length <= 1) continue;
 
-    const clinic = data[i][1];
-    const playerName = data[i][3];
-    const status = data[i][4] || 'M';
+    for (let i = 1; i < data.length; i++) {
+      const rowDate = parseDate(data[i][0]);
+      if (!rowDate) continue;
 
-    if (!playerName || !clinic) continue;
-    if (rowDate.getMonth() + 1 !== billingMonth || rowDate.getFullYear() !== billingYear) continue;
+      const clinic = data[i][1];
+      const playerName = data[i][3];
+      const status = data[i][4] || 'M';
 
-    rows.push({ date: rowDate, clinic: clinic, playerName: playerName, status: status });
+      if (!playerName || !clinic) continue;
+      if (rowDate.getMonth() + 1 !== billingMonth || rowDate.getFullYear() !== billingYear) continue;
+
+      rows.push({ date: rowDate, clinic: clinic, playerName: playerName, status: status });
+    }
   }
   return rows;
 }
@@ -307,41 +336,53 @@ function getClinicSessionDurations() {
  */
 function getAttendanceWithCoachesForMonth(billingMonth, billingYear) {
   const ss = SpreadsheetApp.openById(ATTENDANCE_SHEET_ID);
-  const sheet = ss.getSheetByName('Attendance');
-  if (!sheet) return { rows: [], sessionCoaches: {} };
+  const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December'];
+  const monthTabName = monthNames[billingMonth - 1] + ' ' + billingYear;
 
-  const data = sheet.getDataRange().getValues();
-  if (data.length <= 1) return { rows: [], sessionCoaches: {} };
+  // Collect sheets to read from: month-specific tab first, then legacy "Attendance"
+  const sheetsToRead = [];
+  const monthSheet = ss.getSheetByName(monthTabName);
+  if (monthSheet) sheetsToRead.push(monthSheet);
+  const legacySheet = ss.getSheetByName('Attendance');
+  if (legacySheet) sheetsToRead.push(legacySheet);
+
+  if (sheetsToRead.length === 0) return { rows: [], sessionCoaches: {} };
 
   const rows = [];
   const sessionCoaches = {};
 
-  for (let i = 1; i < data.length; i++) {
-    const rowDate = parseDate(data[i][0]);
-    if (!rowDate) continue;
+  for (const sheet of sheetsToRead) {
+    const data = sheet.getDataRange().getValues();
+    if (data.length <= 1) continue;
 
-    const clinic = data[i][1];
-    const coachesStr = (data[i][2] || '').toString().trim();
-    const playerName = data[i][3];
-    const status = data[i][4] || 'M';
+    for (let i = 1; i < data.length; i++) {
+      const rowDate = parseDate(data[i][0]);
+      if (!rowDate) continue;
 
-    if (!playerName || !clinic) continue;
-    if (rowDate.getMonth() + 1 !== billingMonth || rowDate.getFullYear() !== billingYear) continue;
+      const clinic = data[i][1];
+      const coachesStr = (data[i][2] || '').toString().trim();
+      const playerName = data[i][3];
+      const status = data[i][4] || 'M';
 
-    rows.push({ date: rowDate, clinic: clinic, playerName: playerName, status: status });
+      if (!playerName || !clinic) continue;
+      if (rowDate.getMonth() + 1 !== billingMonth || rowDate.getFullYear() !== billingYear) continue;
 
-    // Capture coaches for this session (date+clinic combo)
-    if (coachesStr) {
-      const dateStr = (rowDate.getMonth() + 1) + '/' + rowDate.getDate() + '/' + rowDate.getFullYear();
-      const sessionKey = dateStr + '|||' + clinic;
-      const newCoaches = coachesStr.split(', ').map(c => c.trim()).filter(c => c);
-      if (!sessionCoaches[sessionKey]) {
-        sessionCoaches[sessionKey] = [];
-      }
-      // De-duplicate coaches (handles multiple submissions for same session)
-      for (const c of newCoaches) {
-        if (!sessionCoaches[sessionKey].includes(c)) {
-          sessionCoaches[sessionKey].push(c);
+      rows.push({ date: rowDate, clinic: clinic, playerName: playerName, status: status });
+
+      // Capture coaches for this session (date+clinic combo)
+      if (coachesStr) {
+        const dateStr = (rowDate.getMonth() + 1) + '/' + rowDate.getDate() + '/' + rowDate.getFullYear();
+        const sessionKey = dateStr + '|||' + clinic;
+        const newCoaches = coachesStr.split(', ').map(c => c.trim()).filter(c => c);
+        if (!sessionCoaches[sessionKey]) {
+          sessionCoaches[sessionKey] = [];
+        }
+        // De-duplicate coaches (handles multiple submissions for same session)
+        for (const c of newCoaches) {
+          if (!sessionCoaches[sessionKey].includes(c)) {
+            sessionCoaches[sessionKey].push(c);
+          }
         }
       }
     }
