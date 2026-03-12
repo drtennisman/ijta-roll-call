@@ -71,16 +71,21 @@ function doPost(e) {
     // Players now come as objects: { name: "Last, First", status: "M"|"G" }
     // Add one row per player
     // Coaches only appear on the first row of each session
-    for (let i = 0; i < players.length; i++) {
-      const player = typeof players[i] === 'string' ? { name: players[i], status: 'M' } : players[i];
-      const row = [
-        date,
-        clinic,
-        i === 0 ? coachesStr : '',  // Coaches only on first row
-        player.name,
-        player.status || 'M'
-      ];
-      sheet.appendRow(row);
+    if (data.noAttendees) {
+      // No one showed up — record a single row noting that
+      sheet.appendRow([date, clinic, coachesStr, 'No Attendees', '']);
+    } else {
+      for (let i = 0; i < players.length; i++) {
+        const player = typeof players[i] === 'string' ? { name: players[i], status: 'M' } : players[i];
+        const row = [
+          date,
+          clinic,
+          i === 0 ? coachesStr : '',  // Coaches only on first row
+          player.name,
+          player.status || 'M'
+        ];
+        sheet.appendRow(row);
+      }
     }
 
     // Auto-add new players to the master roster sheet

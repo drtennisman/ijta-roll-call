@@ -455,7 +455,8 @@
             cursor: pointer;
         }
 
-        #coaches-section.disabled {
+        #coaches-section.disabled,
+        #players-section.disabled {
             opacity: 0.3;
             pointer-events: none;
         }
@@ -694,6 +695,11 @@
             </div>
 
             <div class="section-title">Players <span id="player-counter" class="counter"></span></div>
+            <label class="no-staffing-label">
+                <input type="checkbox" id="no-attendees-checkbox" onchange="toggleNoAttendees()">
+                <span>No Attendees</span>
+            </label>
+            <div id="players-section">
             <div id="players-list" class="checklist"></div>
 
             <div class="add-player-bar">
@@ -704,6 +710,7 @@
                     <option value="S">Social</option>
                 </select>
                 <button class="add-player-btn" onclick="addPlayer()">+ Add</button>
+            </div>
             </div>
         </div>
         <div class="submit-bar">
@@ -948,6 +955,8 @@
             document.getElementById('add-player-input').value = '';
             document.getElementById('no-staffing-checkbox').checked = false;
             document.getElementById('coaches-section').classList.remove('disabled');
+            document.getElementById('no-attendees-checkbox').checked = false;
+            document.getElementById('players-section').classList.remove('disabled');
 
             renderCoaches();
             renderPlayers();
@@ -1003,6 +1012,22 @@
                 document.querySelectorAll('#coaches-list .checklist-item.checked').forEach(item => {
                     item.classList.remove('checked');
                 });
+            } else {
+                section.classList.remove('disabled');
+            }
+            updateSubmitButton();
+        }
+
+        function toggleNoAttendees() {
+            const checked = document.getElementById('no-attendees-checkbox').checked;
+            const section = document.getElementById('players-section');
+
+            if (checked) {
+                section.classList.add('disabled');
+                document.querySelectorAll('#players-list .checklist-item.checked').forEach(item => {
+                    item.classList.remove('checked');
+                });
+                updatePlayerCounter();
             } else {
                 section.classList.remove('disabled');
             }
@@ -1147,6 +1172,7 @@
         // ==================== SUBMIT ====================
         function updateSubmitButton() {
             const noStaffing = document.getElementById('no-staffing-checkbox').checked;
+            const noAttendees = document.getElementById('no-attendees-checkbox').checked;
             const coaches = document.querySelectorAll('#coaches-list .checklist-item.checked');
             const players = document.querySelectorAll('#players-list .checklist-item.checked');
             const btn = document.getElementById('submit-btn');
@@ -1154,6 +1180,9 @@
             if (!noStaffing && coaches.length === 0) {
                 btn.disabled = true;
                 btn.textContent = 'Select at least one coach';
+            } else if (noAttendees) {
+                btn.disabled = false;
+                btn.textContent = 'Submit — No Attendees';
             } else if (players.length === 0) {
                 btn.disabled = true;
                 btn.textContent = 'Select at least one player';
@@ -1164,6 +1193,8 @@
         }
 
         async function submitRoll() {
+            const noAttendees = document.getElementById('no-attendees-checkbox').checked;
+
             if (!APPS_SCRIPT_URL) {
                 APPS_SCRIPT_URL = prompt('Enter the Google Apps Script Web App URL:');
                 if (APPS_SCRIPT_URL) {
@@ -1209,7 +1240,8 @@
                 clinicTab: selectedClinic.tab,
                 coaches: coaches,
                 newCoaches: newCoaches,
-                players: players
+                players: players,
+                noAttendees: noAttendees
             };
 
             try {
@@ -1223,7 +1255,7 @@
                 const result = await response.json();
 
                 if (result.success) {
-                    showSuccess(players.length, coaches);
+                    showSuccess(noAttendees ? 0 : players.length, coaches);
                 } else {
                     throw new Error(result.error || 'Unknown server error');
                 }
@@ -1246,8 +1278,13 @@
         }
 
         function showSuccess(playerCount, coaches) {
-            document.getElementById('success-message').textContent =
-                `${playerCount} player${playerCount !== 1 ? 's' : ''} recorded for ${selectedClinic.display} with ${coaches.join(', ')}.`;
+            let msg;
+            if (playerCount === 0) {
+                msg = `No attendees recorded for ${selectedClinic.display}.`;
+            } else {
+                msg = `${playerCount} player${playerCount !== 1 ? 's' : ''} recorded for ${selectedClinic.display} with ${coaches.join(', ')}.`;
+            }
+            document.getElementById('success-message').textContent = msg;
             document.getElementById('success-overlay').classList.add('active');
         }
 
