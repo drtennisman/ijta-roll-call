@@ -681,19 +681,6 @@
                 <input type="date" id="roll-date-input" class="date-picker-input">
             </div>
 
-            <div class="section-title">Staffing</div>
-            <label class="no-staffing-label">
-                <input type="checkbox" id="no-staffing-checkbox" onchange="toggleNoStaffing()">
-                <span>No Staffing</span>
-            </label>
-            <div id="coaches-section">
-                <div id="coaches-list" class="checklist"></div>
-                <div class="add-player-bar">
-                    <input type="text" id="add-coach-input" class="add-player-input" placeholder="Coach name (e.g. John)">
-                    <button class="add-player-btn" onclick="addCoach()">+ Add</button>
-                </div>
-            </div>
-
             <div class="section-title">Players <span id="player-counter" class="counter"></span></div>
             <label class="no-staffing-label">
                 <input type="checkbox" id="no-attendees-checkbox" onchange="toggleNoAttendees()">
@@ -711,6 +698,19 @@
                 </select>
                 <button class="add-player-btn" onclick="addPlayer()">+ Add</button>
             </div>
+            </div>
+
+            <div class="section-title">Staffing</div>
+            <label class="no-staffing-label">
+                <input type="checkbox" id="no-staffing-checkbox" onchange="toggleNoStaffing()">
+                <span>No Staffing</span>
+            </label>
+            <div id="coaches-section">
+                <div id="coaches-list" class="checklist"></div>
+                <div class="add-player-bar">
+                    <input type="text" id="add-coach-input" class="add-player-input" placeholder="Coach name (e.g. John)">
+                    <button class="add-player-btn" onclick="addCoach()">+ Add</button>
+                </div>
             </div>
         </div>
         <div class="submit-bar">
@@ -1021,6 +1021,7 @@
         function toggleNoAttendees() {
             const checked = document.getElementById('no-attendees-checkbox').checked;
             const section = document.getElementById('players-section');
+            const noStaffingCheckbox = document.getElementById('no-staffing-checkbox');
 
             if (checked) {
                 section.classList.add('disabled');
@@ -1028,8 +1029,16 @@
                     item.classList.remove('checked');
                 });
                 updatePlayerCounter();
+                // No attendees means no staffing needed either
+                noStaffingCheckbox.checked = true;
+                noStaffingCheckbox.disabled = true;
+                toggleNoStaffing();
             } else {
                 section.classList.remove('disabled');
+                // Re-enable staffing checkbox and uncheck it
+                noStaffingCheckbox.disabled = false;
+                noStaffingCheckbox.checked = false;
+                toggleNoStaffing();
             }
             updateSubmitButton();
         }
