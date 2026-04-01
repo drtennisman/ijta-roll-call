@@ -273,6 +273,7 @@ function getAttendanceForMonth(billingMonth, billingYear) {
       const status = data[i][4] || 'M';
 
       if (!playerName || !clinic) continue;
+      if (String(playerName).trim() === 'No Attendees') continue;
       if (rowDate.getMonth() + 1 !== billingMonth || rowDate.getFullYear() !== billingYear) continue;
 
       rows.push({ date: rowDate, clinic: clinic, playerName: playerName, status: status });
@@ -371,6 +372,7 @@ function getAttendanceWithCoachesForMonth(billingMonth, billingYear) {
       const status = data[i][4] || 'M';
 
       if (!playerName || !clinic) continue;
+      if (String(playerName).trim() === 'No Attendees') continue;
       if (rowDate.getMonth() + 1 !== billingMonth || rowDate.getFullYear() !== billingYear) continue;
 
       rows.push({ date: rowDate, clinic: clinic, playerName: playerName, status: status });
@@ -626,79 +628,6 @@ function generateMonthlyBilling(monthOverride, yearOverride) {
     billingSheet.getRange(clinicRow, 3).setValue(cs.revenue);
     billingSheet.getRange(clinicRow, 3).setNumberFormat('$#,##0.00');
     clinicRow++;
-  }
-
-  // Per-clinic billing tabs
-  for (const clinicName of clinicNames) {
-    const clinicTabName = clinicName + ' - Billing - ' + monthName;
-
-    let clinicBillingSheet = billingSS.getSheetByName(clinicTabName);
-    if (clinicBillingSheet) {
-      billingSS.deleteSheet(clinicBillingSheet);
-    }
-    clinicBillingSheet = billingSS.insertSheet(clinicTabName);
-
-    // Header row
-    const clinicBillingHeaders = ['Player Name', 'Status', 'Sessions', 'Total Charged', 'Sibling Discount Note'];
-    clinicBillingSheet.appendRow(clinicBillingHeaders);
-
-    const clinicHeaderRange = clinicBillingSheet.getRange(1, 1, 1, clinicBillingHeaders.length);
-    clinicHeaderRange.setFontWeight('bold');
-    clinicHeaderRange.setBackground('#2e7d32');
-    clinicHeaderRange.setFontColor('white');
-
-    // Filter billing rows for this clinic
-    const clinicBillingRows = billingRows.filter(r => r.clinic === clinicName);
-
-    for (const row of clinicBillingRows) {
-      const siblingNote = siblingLastNames[row.lastName]
-        ? 'CHECK FOR SIBLING DISCOUNT'
-        : '';
-
-      clinicBillingSheet.appendRow([
-        row.name,
-        row.status,
-        row.sessions,
-        row.total,
-        siblingNote
-      ]);
-    }
-
-    // Format total column as currency
-    if (clinicBillingRows.length > 0) {
-      const clinicTotalRange = clinicBillingSheet.getRange(2, 4, clinicBillingRows.length, 1);
-      clinicTotalRange.setNumberFormat('$#,##0.00');
-
-      // Highlight sibling discount rows in yellow
-      for (let i = 0; i < clinicBillingRows.length; i++) {
-        if (siblingLastNames[clinicBillingRows[i].lastName]) {
-          const rowRange = clinicBillingSheet.getRange(i + 2, 1, 1, clinicBillingHeaders.length);
-          rowRange.setBackground('#fff9c4');
-        }
-      }
-    }
-
-    // Set column widths
-    clinicBillingSheet.setColumnWidth(1, 200);  // Player Name
-    clinicBillingSheet.setColumnWidth(2, 80);   // Status
-    clinicBillingSheet.setColumnWidth(3, 80);   // Sessions
-    clinicBillingSheet.setColumnWidth(4, 120);  // Total Charged
-    clinicBillingSheet.setColumnWidth(5, 250);  // Sibling Note
-
-    // Freeze header
-    clinicBillingSheet.setFrozenRows(1);
-
-    // Summary at bottom
-    const clinicSummaryRow = clinicBillingRows.length + 3;
-    clinicBillingSheet.getRange(clinicSummaryRow, 1).setValue('SUMMARY');
-    clinicBillingSheet.getRange(clinicSummaryRow, 1).setFontWeight('bold');
-    clinicBillingSheet.getRange(clinicSummaryRow + 1, 1).setValue('Total Players:');
-    clinicBillingSheet.getRange(clinicSummaryRow + 1, 2).setValue(clinicBillingRows.length);
-    clinicBillingSheet.getRange(clinicSummaryRow + 2, 1).setValue('Total Revenue:');
-
-    const clinicTotalRevenue = clinicBillingRows.reduce((sum, r) => sum + r.total, 0);
-    clinicBillingSheet.getRange(clinicSummaryRow + 2, 2).setValue(clinicTotalRevenue);
-    clinicBillingSheet.getRange(clinicSummaryRow + 2, 2).setNumberFormat('$#,##0.00');
   }
 
   Logger.log('Billing report generated for ' + monthName + ': ' + billingRows.length + ' line items, $' + totalRevenue + ' total');
@@ -1141,12 +1070,11 @@ function generateLastMonthASSummary() {
 }
 
 // ============================================================
-// GENERATE ALL REPORTS (billing + attendance + A/S summary)
+// GENERATE ALL REPORTS (billing + A/S summary)
 // ============================================================
 
 function generateAllReports(monthOverride, yearOverride) {
   generateMonthlyBilling(monthOverride, yearOverride);
-  generateAttendanceSummary(monthOverride, yearOverride);
   generateAttendanceAndStaffingSummary(monthOverride, yearOverride);
 }
 
@@ -1164,6 +1092,80 @@ function generateLastMonthAllReports() {
     year--;
   }
   generateAllReports(month, year);
+}
+
+// ============================================================
+// CUSTOM SHEET MENU
+// ============================================================
+// Adds an "IJTA Reports" menu to the spreadsheet toolbar.
+// This runs automatically when the spreadsheet is opened.
+// ============================================================
+
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('IJTA Reports')
+    .addItem('Generate This Month — All Reports', 'menuCurrentMonthAll')
+    .addItem('Generate Last Month — All Reports', 'menuLastMonthAll')
+    .addSeparator()
+    .addItem('Generate This Month — Billing Only', 'menuCurrentMonthBilling')
+    .addItem('Generate This Month — A/S Summary Only', 'menuCurrentMonthAS')
+    .addSeparator()
+    .addItem('Generate Last Month — Billing Only', 'menuLastMonthBilling')
+    .addItem('Generate Last Month — A/S Summary Only', 'menuLastMonthAS')
+    .addToUi();
+}
+
+// Menu handler functions (with user-friendly alerts)
+
+function menuCurrentMonthAll() {
+  const now = new Date();
+  const monthName = now.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+  generateCurrentMonthAllReports();
+  SpreadsheetApp.getUi().alert('Done! All reports generated for ' + monthName + '.');
+}
+
+function menuLastMonthAll() {
+  const now = new Date();
+  let month = now.getMonth();
+  let year = now.getFullYear();
+  if (month === 0) { month = 12; year--; } else { month; }
+  const monthName = new Date(year, month - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+  generateLastMonthAllReports();
+  SpreadsheetApp.getUi().alert('Done! All reports generated for ' + monthName + '.');
+}
+
+function menuCurrentMonthBilling() {
+  const now = new Date();
+  const monthName = now.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+  generateMonthlyBilling(now.getMonth() + 1, now.getFullYear());
+  SpreadsheetApp.getUi().alert('Done! Billing report generated for ' + monthName + '.');
+}
+
+function menuCurrentMonthAS() {
+  const now = new Date();
+  const monthName = now.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+  generateAttendanceAndStaffingSummary(now.getMonth() + 1, now.getFullYear());
+  SpreadsheetApp.getUi().alert('Done! A/S Summary generated for ' + monthName + '.');
+}
+
+function menuLastMonthBilling() {
+  const now = new Date();
+  let month = now.getMonth();
+  let year = now.getFullYear();
+  if (month === 0) { month = 12; year--; }
+  const monthName = new Date(year, month - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+  generateMonthlyBilling(month, year);
+  SpreadsheetApp.getUi().alert('Done! Billing report generated for ' + monthName + '.');
+}
+
+function menuLastMonthAS() {
+  const now = new Date();
+  let month = now.getMonth();
+  let year = now.getFullYear();
+  if (month === 0) { month = 12; year--; }
+  const monthName = new Date(year, month - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+  generateAttendanceAndStaffingSummary(month, year);
+  SpreadsheetApp.getUi().alert('Done! A/S Summary generated for ' + monthName + '.');
 }
 
 // ============================================================
@@ -1191,5 +1193,5 @@ function setupMonthlyTrigger() {
     .atHour(0)
     .create();
 
-  Logger.log('Monthly trigger set up — billing + attendance summary will run on the 1st of each month');
+  Logger.log('Monthly trigger set up — billing + A/S summary will run on the 1st of each month');
 }
