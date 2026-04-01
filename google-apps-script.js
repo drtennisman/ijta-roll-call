@@ -888,8 +888,9 @@ function generateAttendanceAndStaffingSummary(monthOverride, yearOverride) {
     let currentRow = 4;
     let totalCheckIns = 0;
 
-    // Track total sessions each coach worked for this clinic
+    // Track total sessions and dates each coach worked for this clinic
     const coachSessionCount = {};
+    const coachSessionDates = {};
 
     for (const dateStr of sortedDates) {
       const players = cd.dates[dateStr].sort();
@@ -903,9 +904,11 @@ function generateAttendanceAndStaffingSummary(monthOverride, yearOverride) {
       sheet.getRange(currentRow, 3).setValue(coachesDisplay);
       sheet.getRange(currentRow, 4).setValue(players.join('; '));
 
-      // Tally coach sessions
+      // Tally coach sessions and track dates
       for (const coach of dateCoaches) {
         coachSessionCount[coach] = (coachSessionCount[coach] || 0) + 1;
+        if (!coachSessionDates[coach]) coachSessionDates[coach] = [];
+        coachSessionDates[coach].push(dateStr);
       }
       currentRow++;
     }
@@ -978,7 +981,7 @@ function generateAttendanceAndStaffingSummary(monthOverride, yearOverride) {
     sheet.getRange(currentRow, 1).setFontSize(11);
     currentRow++;
 
-    const staffingHeaders = ['Coach', 'Sessions', 'Hours/Session', 'Total Hours', 'Rate ($/hr)', 'Total Cost'];
+    const staffingHeaders = ['Coach', 'Sessions', 'Dates', 'Hours/Session', 'Total Hours', 'Rate ($/hr)', 'Total Cost'];
     sheet.getRange(currentRow, 1, 1, staffingHeaders.length).setValues([staffingHeaders]);
     sheet.getRange(currentRow, 1, 1, staffingHeaders.length).setFontWeight('bold');
     sheet.getRange(currentRow, 1, 1, staffingHeaders.length).setBackground('#e65100');
@@ -991,6 +994,7 @@ function generateAttendanceAndStaffingSummary(monthOverride, yearOverride) {
 
     for (const coach of coachNames) {
       const sessions = coachSessionCount[coach];
+      const dates = (coachSessionDates[coach] || []).join(', ');
       const rate = coachRates[coach] || 0;
       const totalHours = sessions * sessionHours;
       const cost = totalHours * rate;
@@ -998,25 +1002,26 @@ function generateAttendanceAndStaffingSummary(monthOverride, yearOverride) {
 
       sheet.getRange(currentRow, 1).setValue(coach);
       sheet.getRange(currentRow, 2).setValue(sessions);
-      sheet.getRange(currentRow, 3).setValue(sessionHours);
-      sheet.getRange(currentRow, 4).setValue(totalHours);
-      sheet.getRange(currentRow, 5).setValue(rate);
-      sheet.getRange(currentRow, 6).setValue(cost);
+      sheet.getRange(currentRow, 3).setValue(dates);
+      sheet.getRange(currentRow, 4).setValue(sessionHours);
+      sheet.getRange(currentRow, 5).setValue(totalHours);
+      sheet.getRange(currentRow, 6).setValue(rate);
+      sheet.getRange(currentRow, 7).setValue(cost);
       currentRow++;
     }
 
     // Format currency columns
     if (coachNames.length > 0) {
-      sheet.getRange(staffingStartRow, 5, coachNames.length, 1).setNumberFormat('$#,##0.00');
       sheet.getRange(staffingStartRow, 6, coachNames.length, 1).setNumberFormat('$#,##0.00');
+      sheet.getRange(staffingStartRow, 7, coachNames.length, 1).setNumberFormat('$#,##0.00');
     }
 
     // Total staffing cost row
     sheet.getRange(currentRow, 1).setValue('TOTAL STAFFING COST');
     sheet.getRange(currentRow, 1).setFontWeight('bold');
-    sheet.getRange(currentRow, 6).setValue(totalStaffingCost);
-    sheet.getRange(currentRow, 6).setNumberFormat('$#,##0.00');
-    sheet.getRange(currentRow, 6).setFontWeight('bold');
+    sheet.getRange(currentRow, 7).setValue(totalStaffingCost);
+    sheet.getRange(currentRow, 7).setNumberFormat('$#,##0.00');
+    sheet.getRange(currentRow, 7).setFontWeight('bold');
     currentRow += 2;
 
     // === SECTION 4: NET PROFIT ===
@@ -1039,11 +1044,12 @@ function generateAttendanceAndStaffingSummary(monthOverride, yearOverride) {
 
     // Set column widths
     sheet.setColumnWidth(1, 180);
-    sheet.setColumnWidth(2, 100);
-    sheet.setColumnWidth(3, 180);
+    sheet.setColumnWidth(2, 80);
+    sheet.setColumnWidth(3, 300);
     sheet.setColumnWidth(4, 400);
     sheet.setColumnWidth(5, 100);
-    sheet.setColumnWidth(6, 120);
+    sheet.setColumnWidth(6, 100);
+    sheet.setColumnWidth(7, 120);
 
     // Freeze header rows
     sheet.setFrozenRows(3);
