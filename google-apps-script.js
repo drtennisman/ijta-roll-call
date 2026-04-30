@@ -156,7 +156,7 @@ function addNewPlayersToRoster(clinicTab, players) {
         const parts = name.split(',');
         const lastName = (parts[0] || '').trim();
         const firstName = (parts[1] || '').trim();
-        const status = player.status === 'G' ? 'G' : 'M';
+        const status = player.status === 'G' ? 'G' : player.status === 'S' ? 'S' : 'M';
 
         rosterSheet.appendRow([lastName, firstName, status]);
         existingNames.add(name.toLowerCase());
