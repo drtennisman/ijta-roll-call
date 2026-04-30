@@ -450,7 +450,7 @@ function getTotalCharge(clinic, status, sessions) {
   const rate = PER_SESSION_RATE[clinic];
   if (!table || !rate) return 0;
 
-  const s = status === 'G' ? 'G' : 'M';
+  const s = (status === 'G' || status === 'S') ? 'G' : 'M';
   const lookup = table[s];
 
   if (sessions <= 0) return 0;
