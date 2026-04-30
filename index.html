@@ -786,7 +786,7 @@
         async function loadClinicRoster(clinic) {
             try {
                 const url = `https://docs.google.com/spreadsheets/d/${ROSTER_SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(clinic.tab)}`;
-                const response = await fetch(url);
+                const response = await fetch(url, { cache: 'no-store' });
                 if (!response.ok) throw new Error(`Failed to fetch ${clinic.tab}`);
                 const csvText = await response.text();
                 rosterData[clinic.name] = parseClinicCSV(csvText);
@@ -799,7 +799,7 @@
         async function loadCoaches() {
             try {
                 const url = `https://docs.google.com/spreadsheets/d/${ROSTER_SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent('Coaches')}`;
-                const response = await fetch(url);
+                const response = await fetch(url, { cache: 'no-store' });
                 if (!response.ok) throw new Error('Failed to fetch Coaches');
                 const csvText = await response.text();
                 const lines = csvText.split('\n').filter(line => line.trim());
