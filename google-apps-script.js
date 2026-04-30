@@ -476,161 +476,107 @@ function generateMonthlyBilling(monthOverride, yearOverride) {
     return;
   }
 
-  // Tally sessions per player per clinic
-  const playerData = {}; // key: "PlayerName|||Clinic" -> { name, clinic, status, sessions }
+  // Group sessions by clinic -> player
+  const clinicData = {}; // { clinic: { playerKey: { name, status, sessions } } }
 
   for (const row of attendanceRows) {
-    const key = row.playerName + '|||' + row.clinic;
-    if (!playerData[key]) {
-      playerData[key] = { name: row.playerName, clinic: row.clinic, status: row.status, sessions: 0 };
+    if (!clinicData[row.clinic]) clinicData[row.clinic] = {};
+    const cd = clinicData[row.clinic];
+    if (!cd[row.playerName]) {
+      cd[row.playerName] = { name: row.playerName, status: row.status, sessions: 0 };
     }
-    playerData[key].sessions++;
+    cd[row.playerName].sessions++;
   }
 
-  // Build billing rows
-  const billingRows = [];
-  const lastNames = {}; // track last names for sibling flagging
-
-  for (const key in playerData) {
-    const p = playerData[key];
-    const total = getTotalCharge(p.clinic, p.status, p.sessions);
-    const lastName = p.name.split(',')[0].trim();
-
-    if (!lastNames[lastName]) lastNames[lastName] = [];
-    lastNames[lastName].push(p.name);
-
-    billingRows.push({
-      name: p.name,
-      clinic: p.clinic,
-      status: p.status === 'G' ? 'Guest' : 'Member',
-      sessions: p.sessions,
-      total: total,
-      lastName: lastName
-    });
-  }
-
-  // Determine which last names have multiple players (potential siblings)
-  const siblingLastNames = {};
-  for (const ln in lastNames) {
-    // Get unique player names for this last name
-    const uniqueNames = [...new Set(lastNames[ln])];
-    if (uniqueNames.length > 1) {
-      siblingLastNames[ln] = true;
-    }
-  }
-
-  // Sort by last name, then clinic
-  billingRows.sort((a, b) => {
-    const nameCompare = a.name.localeCompare(b.name);
-    if (nameCompare !== 0) return nameCompare;
-    return a.clinic.localeCompare(b.clinic);
-  });
-
-  // Write to billing sheet
   const billingSS = SpreadsheetApp.openById(BILLING_SHEET_ID);
-  const tabName = 'Billing Summary - ' + monthName;
 
-  // Delete existing tab for this month if it exists
-  let billingSheet = billingSS.getSheetByName(tabName);
-  if (billingSheet) {
-    billingSS.deleteSheet(billingSheet);
-  }
-  billingSheet = billingSS.insertSheet(tabName);
+  for (const clinic in clinicData) {
+    const playerMap = clinicData[clinic];
 
-  // Header row
-  const headers = ['Player Name', 'Clinic', 'Status', 'Sessions', 'Total Charged', 'Sibling Discount Note'];
-  billingSheet.appendRow(headers);
+    // Build billing rows for this clinic
+    const lastNames = {};
+    const billingRows = [];
 
-  // Format header
-  const headerRange = billingSheet.getRange(1, 1, 1, headers.length);
-  headerRange.setFontWeight('bold');
-  headerRange.setBackground('#2e7d32');
-  headerRange.setFontColor('white');
+    for (const key in playerMap) {
+      const p = playerMap[key];
+      const total = getTotalCharge(clinic, p.status, p.sessions);
+      const lastName = p.name.split(',')[0].trim();
 
-  // Data rows
-  for (const row of billingRows) {
-    const siblingNote = siblingLastNames[row.lastName]
-      ? 'CHECK FOR SIBLING DISCOUNT'
-      : '';
+      if (!lastNames[lastName]) lastNames[lastName] = [];
+      lastNames[lastName].push(p.name);
 
-    billingSheet.appendRow([
-      row.name,
-      row.clinic,
-      row.status,
-      row.sessions,
-      row.total,
-      siblingNote
-    ]);
-  }
+      billingRows.push({
+        name: p.name,
+        status: p.status === 'G' ? 'Guest' : p.status === 'S' ? 'Social' : 'Member',
+        sessions: p.sessions,
+        total: total,
+        lastName: lastName
+      });
+    }
 
-  // Format total column as currency
-  if (billingRows.length > 0) {
-    const totalRange = billingSheet.getRange(2, 5, billingRows.length, 1);
-    totalRange.setNumberFormat('$#,##0.00');
+    // Flag siblings within this clinic
+    const siblingLastNames = {};
+    for (const ln in lastNames) {
+      if ([...new Set(lastNames[ln])].length > 1) siblingLastNames[ln] = true;
+    }
 
-    // Highlight sibling discount rows in yellow
-    for (let i = 0; i < billingRows.length; i++) {
-      if (siblingLastNames[billingRows[i].lastName]) {
-        const rowRange = billingSheet.getRange(i + 2, 1, 1, headers.length);
-        rowRange.setBackground('#fff9c4');
+    billingRows.sort((a, b) => a.name.localeCompare(b.name));
+
+    const tabName = clinic + ' - Billing - ' + monthName;
+    let sheet = billingSS.getSheetByName(tabName);
+    if (sheet) billingSS.deleteSheet(sheet);
+    sheet = billingSS.insertSheet(tabName);
+
+    // Header
+    const headers = ['Player Name', 'Status', 'Sessions', 'Total Charged', 'Sibling Discount Note'];
+    sheet.appendRow(headers);
+    const headerRange = sheet.getRange(1, 1, 1, headers.length);
+    headerRange.setFontWeight('bold');
+    headerRange.setBackground('#2e7d32');
+    headerRange.setFontColor('white');
+
+    // Data rows
+    for (const row of billingRows) {
+      sheet.appendRow([
+        row.name,
+        row.status,
+        row.sessions,
+        row.total,
+        siblingLastNames[row.lastName] ? 'CHECK FOR SIBLING DISCOUNT' : ''
+      ]);
+    }
+
+    // Format currency and highlight siblings
+    if (billingRows.length > 0) {
+      sheet.getRange(2, 4, billingRows.length, 1).setNumberFormat('$#,##0.00');
+      for (let i = 0; i < billingRows.length; i++) {
+        if (siblingLastNames[billingRows[i].lastName]) {
+          sheet.getRange(i + 2, 1, 1, headers.length).setBackground('#fff9c4');
+        }
       }
     }
+
+    // Column widths
+    sheet.setColumnWidth(1, 200);
+    sheet.setColumnWidth(2, 80);
+    sheet.setColumnWidth(3, 80);
+    sheet.setColumnWidth(4, 120);
+    sheet.setColumnWidth(5, 250);
+    sheet.setFrozenRows(1);
+
+    // Summary at bottom
+    const summaryStartRow = billingRows.length + 3;
+    sheet.getRange(summaryStartRow, 1).setValue('SUMMARY');
+    sheet.getRange(summaryStartRow, 1).setFontWeight('bold');
+    sheet.getRange(summaryStartRow + 1, 1).setValue('Total Players:');
+    sheet.getRange(summaryStartRow + 1, 2).setValue(billingRows.length);
+    sheet.getRange(summaryStartRow + 2, 1).setValue('Total Revenue:');
+    const totalRevenue = billingRows.reduce((sum, r) => sum + r.total, 0);
+    sheet.getRange(summaryStartRow + 2, 2).setValue(totalRevenue);
+    sheet.getRange(summaryStartRow + 2, 2).setNumberFormat('$#,##0.00');
+
+    Logger.log('Billing report generated for ' + clinic + ': ' + billingRows.length + ' players, $' + totalRevenue);
   }
-
-  // Set column widths
-  billingSheet.setColumnWidth(1, 200);  // Player Name
-  billingSheet.setColumnWidth(2, 160);  // Clinic
-  billingSheet.setColumnWidth(3, 80);   // Status
-  billingSheet.setColumnWidth(4, 80);   // Sessions
-  billingSheet.setColumnWidth(5, 120);  // Total Charged
-  billingSheet.setColumnWidth(6, 250);  // Sibling Note
-
-  // Freeze header
-  billingSheet.setFrozenRows(1);
-
-  // Add summary at bottom
-  const summaryStartRow = billingRows.length + 3;
-  billingSheet.getRange(summaryStartRow, 1).setValue('MONTHLY SUMMARY');
-  billingSheet.getRange(summaryStartRow, 1).setFontWeight('bold');
-  billingSheet.getRange(summaryStartRow + 1, 1).setValue('Total Players:');
-  billingSheet.getRange(summaryStartRow + 1, 2).setValue(billingRows.length);
-  billingSheet.getRange(summaryStartRow + 2, 1).setValue('Total Revenue:');
-
-  const totalRevenue = billingRows.reduce((sum, r) => sum + r.total, 0);
-  billingSheet.getRange(summaryStartRow + 2, 2).setValue(totalRevenue);
-  billingSheet.getRange(summaryStartRow + 2, 2).setNumberFormat('$#,##0.00');
-
-  // Per-clinic revenue breakdown
-  const clinicSummary = {};
-  for (const row of billingRows) {
-    if (!clinicSummary[row.clinic]) {
-      clinicSummary[row.clinic] = { players: 0, revenue: 0 };
-    }
-    clinicSummary[row.clinic].players++;
-    clinicSummary[row.clinic].revenue += row.total;
-  }
-
-  let clinicRow = summaryStartRow + 4;
-  billingSheet.getRange(clinicRow, 1).setValue('REVENUE BY CLINIC');
-  billingSheet.getRange(clinicRow, 1).setFontWeight('bold');
-  clinicRow++;
-
-  const clinicHeaders = ['Clinic', 'Players', 'Revenue'];
-  billingSheet.getRange(clinicRow, 1, 1, clinicHeaders.length).setValues([clinicHeaders]);
-  billingSheet.getRange(clinicRow, 1, 1, clinicHeaders.length).setFontWeight('bold');
-  clinicRow++;
-
-  const clinicNames = Object.keys(clinicSummary).sort();
-  for (const name of clinicNames) {
-    const cs = clinicSummary[name];
-    billingSheet.getRange(clinicRow, 1).setValue(name);
-    billingSheet.getRange(clinicRow, 2).setValue(cs.players);
-    billingSheet.getRange(clinicRow, 3).setValue(cs.revenue);
-    billingSheet.getRange(clinicRow, 3).setNumberFormat('$#,##0.00');
-    clinicRow++;
-  }
-
-  Logger.log('Billing report generated for ' + monthName + ': ' + billingRows.length + ' line items, $' + totalRevenue + ' total');
 }
 
 // Convenience function: generate billing for the current month
