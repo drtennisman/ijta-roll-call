@@ -715,6 +715,7 @@
             </div>
         </div>
         <div class="submit-bar">
+            <div id="bottom-counter" style="text-align:center; font-size:13px; color:#888; margin-bottom:8px; font-weight:500;"></div>
             <button class="submit-btn" id="submit-btn" onclick="submitRoll()">Submit Attendance</button>
         </div>
     </div>
@@ -1177,6 +1178,15 @@
             const items = document.querySelectorAll('#players-list .checklist-item');
             const checked = document.querySelectorAll('#players-list .checklist-item.checked');
             document.getElementById('player-counter').textContent = `(${checked.length}/${items.length})`;
+            const bottomCounter = document.getElementById('bottom-counter');
+            if (bottomCounter) {
+                const noAttendees = document.getElementById('no-attendees-checkbox').checked;
+                if (noAttendees) {
+                    bottomCounter.textContent = '';
+                } else {
+                    bottomCounter.textContent = `${checked.length} of ${items.length} players selected`;
+                }
+            }
         }
 
         // ==================== SUBMIT ====================
