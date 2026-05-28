@@ -1367,7 +1367,8 @@
             if (playerCount === 0) {
                 msg = `No attendees recorded for ${selectedClinic.display}.`;
             } else {
-                msg = `${playerCount} player${playerCount !== 1 ? 's' : ''} recorded for ${selectedClinic.display} with ${coaches.join(', ')}.`;
+                const coachNames = coaches.map(c => typeof c === 'string' ? c : c.name).join(', ');
+                msg = `${playerCount} player${playerCount !== 1 ? 's' : ''} recorded for ${selectedClinic.display} with ${coachNames}.`;
             }
             document.getElementById('success-message').textContent = msg;
             document.getElementById('success-overlay').classList.add('active');
