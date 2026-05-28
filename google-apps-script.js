@@ -111,7 +111,7 @@ function doPost(e) {
 // This handles GET requests (for testing)
 function doGet(e) {
   return ContentService
-    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running' }))
+    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'coach-hours-v2' }))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
