@@ -637,6 +637,41 @@
         .hours-toggle.half {
             background: #fb8c00;
         }
+
+        /* Missing roll banner + clinic badges */
+        .missing-banner {
+            background: #fff3e0;
+            border: 2px solid #e65100;
+            border-radius: 12px;
+            padding: 12px 16px;
+            margin-bottom: 14px;
+            font-size: 14px;
+            color: #bf360c;
+            line-height: 1.5;
+        }
+
+        .missing-banner strong {
+            display: block;
+            margin-bottom: 4px;
+        }
+
+        .missing-banner .missing-hint {
+            margin-top: 6px;
+            font-size: 12px;
+            color: #8d6e63;
+            font-style: italic;
+        }
+
+        .clinic-btn .missing-badge {
+            float: right;
+            background: #ffebee;
+            color: #c62828;
+            font-size: 12px;
+            font-weight: 700;
+            padding: 2px 8px;
+            border-radius: 10px;
+            margin-left: 8px;
+        }
     </style>
 </head>
 <body>
@@ -653,6 +688,7 @@
             </div>
         </div>
         <div class="container">
+            <div id="missing-banner" class="missing-banner" style="display:none;"></div>
             <div id="clinic-list">
                 <div class="loading">
                     <div class="spinner"></div>
@@ -777,12 +813,14 @@
         // ==================== STATE ====================
         let rosterData = {};  // { clinicName: [ { name: "Last, First", status: "M"|"G" } ] }
         let selectedClinic = null;  // the clinic object from CLINICS
+        let missingRolls = [];  // [ { date: "M/D/YYYY", clinic: "Display Name", day: "Tuesday" } ]
 
         // ==================== INITIALIZATION ====================
         document.addEventListener('DOMContentLoaded', () => {
             loadAllRosters();
             loadCoaches();
             checkAppsScriptUrl();
+            loadMissingRolls();
         });
 
         function checkAppsScriptUrl() {
@@ -923,6 +961,7 @@
                 const btn = document.createElement('button');
                 btn.className = 'clinic-btn';
                 btn.setAttribute('data-clinic', clinic.name);
+                btn.setAttribute('data-display', clinic.display);
                 btn.innerHTML = `
                     <span class="clinic-icon"></span>
                     ${clinic.display}
@@ -946,6 +985,61 @@
             document.getElementById('total-guests-count').textContent = totalGuests;
             document.getElementById('total-social-count').textContent = totalSocial;
             totalBar.style.display = '';
+
+            // Re-apply missing-roll badges to the freshly built buttons
+            updateMissingBadges();
+        }
+
+        // ==================== MISSING ROLL ALERTS ====================
+        async function loadMissingRolls() {
+            if (!APPS_SCRIPT_URL) return;
+            try {
+                const response = await fetch(`${APPS_SCRIPT_URL}?action=missingRolls&_=${Date.now()}`, { redirect: 'follow' });
+                const result = await response.json();
+                missingRolls = (result && result.success && Array.isArray(result.missing)) ? result.missing : [];
+            } catch (error) {
+                console.error('Missing-roll check failed:', error);
+                missingRolls = [];
+            }
+            updateMissingBadges();
+        }
+
+        function updateMissingBadges() {
+            const banner = document.getElementById('missing-banner');
+
+            // Group missing entries by clinic display name
+            const byClinic = {};
+            missingRolls.forEach(m => {
+                (byClinic[m.clinic] = byClinic[m.clinic] || []).push(m);
+            });
+
+            // Warning banner above the clinic list
+            if (missingRolls.length === 0) {
+                banner.style.display = 'none';
+                banner.innerHTML = '';
+            } else {
+                const lines = missingRolls.map(m =>
+                    `<div>&bull; ${m.day} ${m.date} &mdash; ${m.clinic}</div>`).join('');
+                banner.innerHTML =
+                    `<strong>&#9888;&#65039; Missing Roll${missingRolls.length !== 1 ? 's' : ''}</strong>` +
+                    lines +
+                    `<div class="missing-hint">Open the clinic, set the date to the missed day, and submit &mdash; check "No Attendees" if the clinic didn't run.</div>`;
+                banner.style.display = '';
+            }
+
+            // Red badge on each affected clinic button
+            document.querySelectorAll('#clinic-list .clinic-btn').forEach(btn => {
+                const existing = btn.querySelector('.missing-badge');
+                if (existing) existing.remove();
+                const display = btn.getAttribute('data-display');
+                if (byClinic[display]) {
+                    const badge = document.createElement('span');
+                    badge.className = 'missing-badge';
+                    const n = byClinic[display].length;
+                    badge.innerHTML = `&#9888;&#65039; ${n} missing`;
+                    btn.appendChild(badge);
+                }
+            });
         }
 
         function selectClinic(clinic) {
@@ -957,9 +1051,10 @@
         function showClinicScreen() {
             document.getElementById('clinic-screen').classList.add('active');
             document.getElementById('roll-screen').classList.remove('active');
-            // Refresh rosters and coaches each time we go back
+            // Refresh rosters, coaches, and missing-roll alerts each time we go back
             loadAllRosters();
             loadCoaches();
+            loadMissingRolls();
         }
 
         function showRollScreen() {

@@ -21,6 +21,12 @@
 const ATTENDANCE_SHEET_ID = '1ipQEh5KCRywBOin8GM4xjzvGh9iK1YWp8VD9BXGH_YA';
 const ROSTER_SHEET_ID = '10nb7o9ZJ-fRyTnA2wosGa6OBCTZeEcGAKRAuCY7PZ8E';
 
+// Missing-roll reminders: don't flag/alert on anything before this date
+// (the schedule changed for summer, so older "gaps" aren't real misses).
+const REMINDER_GO_LIVE = '2026-06-29';
+// Live roll app URL — included in alert emails.
+const ROLL_APP_URL = 'https://drtennisman.github.io/ijta-roll-call/';
+
 /**
  * Convert a date string ("MM/DD/YYYY") into a month tab name (e.g. "March 2026").
  */
@@ -108,10 +114,17 @@ function doPost(e) {
   }
 }
 
-// This handles GET requests (for testing)
+// This handles GET requests (health check + the app's missing-roll lookup)
 function doGet(e) {
+  const action = (e && e.parameter && e.parameter.action) || '';
+  if (action === 'missingRolls') {
+    const missing = remindersEnabled() ? getCurrentMissingRolls() : [];
+    return ContentService
+      .createTextOutput(JSON.stringify({ success: true, missing: missing }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
   return ContentService
-    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'coach-hours-v2' }))
+    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'reminders-v1' }))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -374,6 +387,10 @@ function getAttendanceWithCoachesForMonth(billingMonth, billingYear) {
 
   if (sheetsToRead.length === 0) return { rows: [], sessionCoaches: {} };
 
+  // Clinic session durations — used as the default hours for bare coach
+  // names (entries without an explicit "(Xh)" tag, e.g. legacy data).
+  const sessionDurations = getClinicSessionDurations();
+
   const rows = [];
   const sessionCoaches = {};
 
@@ -400,7 +417,9 @@ function getAttendanceWithCoachesForMonth(billingMonth, billingYear) {
       if (coachesStr) {
         const dateStr = (rowDate.getMonth() + 1) + '/' + rowDate.getDate() + '/' + rowDate.getFullYear();
         const sessionKey = dateStr + '|||' + clinic;
-        const newCoaches = parseCoachEntries(coachesStr, 1);
+        // Bare names (no "(Xh)" tag) default to this clinic's full session length
+        const defaultHours = sessionDurations[clinic] || 1;
+        const newCoaches = parseCoachEntries(coachesStr, defaultHours);
         if (!sessionCoaches[sessionKey]) {
           sessionCoaches[sessionKey] = [];
         }
@@ -1085,6 +1104,12 @@ function onOpen() {
     .addItem('Generate Last Month — Billing Only', 'menuLastMonthBilling')
     .addItem('Generate Last Month — A/S Summary Only', 'menuLastMonthAS')
     .addToUi();
+
+  ui.createMenu('Roll Reminders')
+    .addItem('Send Me a Test Alert', 'menuTestReminder')
+    .addItem('Check for Missing Rolls Now', 'menuCheckMissingNow')
+    .addItem('Show What’s Missing', 'menuShowMissing')
+    .addToUi();
 }
 
 // Menu handler functions (with user-friendly alerts)
@@ -1166,4 +1191,290 @@ function setupMonthlyTrigger() {
     .create();
 
   Logger.log('Monthly trigger set up — billing + A/S summary will run on the 1st of each month');
+}
+
+// ============================================================
+// MISSING-ROLL REMINDERS
+// ============================================================
+// Flags clinics that were scheduled but have no roll logged,
+// emails alerts (8pm same day + 7am next morning), and exposes
+// the list to the app for an in-app warning badge.
+//
+// EVERYTHING is managed from tabs in the ROSTER spreadsheet
+// (same place as Coaches & Clinic Config) — no code changes needed:
+//   "Clinic Schedule"   — Clinic Name | Days (e.g. "Tue, Wed, Thu")
+//   "Alert Recipients"  — Name | Email
+//   "Reminder Settings" — "Reminders On?" | Yes/No  (master switch)
+//
+// ONE-TIME SETUP (run each once from the editor's Run button):
+//   1. setupReminderTabs()         — creates the three tabs, pre-filled
+//   2. setupMissingRollTriggers()  — schedules the 8pm + 7am checks
+// Then redeploy (New version) so the app can read the missing list.
+//
+// DAY-TO-DAY: use the "Roll Reminders" menu in the spreadsheet.
+// ============================================================
+
+const DAY_ABBR_TO_NUM = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
+const DAY_NUM_TO_NAME = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+// ---- Config readers (all from the ROSTER spreadsheet) ----
+
+function remindersEnabled() {
+  const sheet = SpreadsheetApp.openById(ROSTER_SHEET_ID).getSheetByName('Reminder Settings');
+  if (!sheet) return true; // default ON if the settings tab isn't there yet
+  const data = sheet.getDataRange().getValues();
+  for (let i = 0; i < data.length; i++) {
+    if ((data[i][0] || '').toString().toLowerCase().indexOf('remind') !== -1) {
+      const val = (data[i][1] || '').toString().trim().toLowerCase();
+      return !(val === 'no' || val === 'off' || val === 'false' || val === '0');
+    }
+  }
+  return true;
+}
+
+function getClinicSchedule() {
+  const sheet = SpreadsheetApp.openById(ROSTER_SHEET_ID).getSheetByName('Clinic Schedule');
+  if (!sheet) return {};
+  const data = sheet.getDataRange().getValues();
+  const schedule = {};
+  for (let i = 1; i < data.length; i++) {
+    const clinic = (data[i][0] || '').toString().trim();
+    const daysStr = (data[i][1] || '').toString().toLowerCase();
+    if (!clinic) continue;
+    const days = [];
+    for (const abbr in DAY_ABBR_TO_NUM) {
+      if (daysStr.indexOf(abbr) !== -1) days.push(DAY_ABBR_TO_NUM[abbr]);
+    }
+    if (days.length) schedule[clinic] = days;
+  }
+  return schedule;
+}
+
+function getAlertRecipients() {
+  const sheet = SpreadsheetApp.openById(ROSTER_SHEET_ID).getSheetByName('Alert Recipients');
+  if (!sheet) return [];
+  const data = sheet.getDataRange().getValues();
+  const emails = [];
+  for (let i = 1; i < data.length; i++) {
+    const email = (data[i][1] || '').toString().trim();
+    if (email && email.indexOf('@') !== -1) emails.push(email);
+  }
+  return emails;
+}
+
+// ---- Missing-roll detection ----
+
+// Build a set of "M/D/YYYY|||Clinic" keys for every roll already logged
+// in the month tabs spanning [startDate, endDate].
+function getLoggedSet(startDate, endDate) {
+  const ss = SpreadsheetApp.openById(ATTENDANCE_SHEET_ID);
+  const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December'];
+  const logged = {};
+  const cur = new Date(startDate.getFullYear(), startDate.getMonth(), 1);
+  const last = new Date(endDate.getFullYear(), endDate.getMonth(), 1);
+  while (cur <= last) {
+    const sheet = ss.getSheetByName(monthNames[cur.getMonth()] + ' ' + cur.getFullYear());
+    if (sheet) {
+      const data = sheet.getDataRange().getValues();
+      for (let i = 1; i < data.length; i++) {
+        const rd = parseDate(data[i][0]);
+        if (!rd) continue;
+        const clinic = (data[i][1] || '').toString().trim();
+        if (!clinic) continue;
+        // ANY row counts as logged — including a "No Attendees" row.
+        logged[(rd.getMonth() + 1) + '/' + rd.getDate() + '/' + rd.getFullYear() + '|||' + clinic] = true;
+      }
+    }
+    cur.setMonth(cur.getMonth() + 1);
+  }
+  return logged;
+}
+
+// Returns [{ date: "M/D/YYYY", clinic, day }] for every scheduled
+// clinic-day in range with no roll logged. Never reaches before go-live.
+function getMissingRolls(startDate, endDate) {
+  const schedule = getClinicSchedule();
+  if (Object.keys(schedule).length === 0) return [];
+
+  const goLive = new Date(REMINDER_GO_LIVE + 'T00:00:00');
+  const start = new Date(Math.max(startDate.getTime(), goLive.getTime()));
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(endDate);
+  end.setHours(0, 0, 0, 0);
+  if (start > end) return [];
+
+  const logged = getLoggedSet(start, end);
+  const missing = [];
+  const d = new Date(start);
+  while (d <= end) {
+    const wd = d.getDay();
+    const dateStr = (d.getMonth() + 1) + '/' + d.getDate() + '/' + d.getFullYear();
+    for (const clinic in schedule) {
+      if (schedule[clinic].indexOf(wd) !== -1 && !logged[dateStr + '|||' + clinic]) {
+        missing.push({ date: dateStr, clinic: clinic, day: DAY_NUM_TO_NAME[wd] });
+      }
+    }
+    d.setDate(d.getDate() + 1);
+  }
+  missing.sort((a, b) => new Date(a.date) - new Date(b.date));
+  return missing;
+}
+
+// Outstanding missing rolls from go-live through YESTERDAY
+// (today's clinics may not have happened yet, so today is excluded).
+function getCurrentMissingRolls() {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  return getMissingRolls(new Date(REMINDER_GO_LIVE + 'T00:00:00'), yesterday);
+}
+
+// ---- Email alerts ----
+
+function sendMissingRollEmail(recipients, missing, isTest) {
+  const n = missing.length;
+  const subject = (isTest ? '[TEST] ' : '') + '⚠️ Missing Roll Alert — ' +
+    n + ' clinic' + (n !== 1 ? 's' : '') + ' need attendance';
+
+  let html = '<div style="font-family:Arial,sans-serif;color:#333;">';
+  html += '<h2 style="color:#c62828;margin-bottom:4px;">⚠️ Missing Roll' + (n !== 1 ? 's' : '') + '</h2>';
+  html += '<p>These scheduled clinics have <strong>no attendance logged</strong>:</p><ul>';
+  for (const m of missing) {
+    html += '<li><strong>' + m.day + ' ' + m.date + '</strong> — ' + m.clinic + '</li>';
+  }
+  html += '</ul>';
+  html += '<p><a href="' + ROLL_APP_URL + '" style="display:inline-block;background:#021f3d;color:#fff;' +
+    'padding:10px 18px;border-radius:8px;text-decoration:none;font-weight:bold;">Open the Roll App</a></p>';
+  if (isTest) html += '<p style="color:#888;font-size:12px;">This is a test — your reminder system is working.</p>';
+  html += '</div>';
+
+  MailApp.sendEmail({ to: recipients.join(','), subject: subject, htmlBody: html });
+}
+
+// Core check used by the triggers. includeToday=true for the evening run
+// (clinics are done by 8pm); false for the morning run (through yesterday).
+function emailMissingRolls(includeToday) {
+  if (!remindersEnabled()) return;
+  const end = new Date();
+  end.setHours(0, 0, 0, 0);
+  if (!includeToday) end.setDate(end.getDate() - 1);
+
+  const missing = getMissingRolls(new Date(REMINDER_GO_LIVE + 'T00:00:00'), end);
+  if (missing.length === 0) return;
+
+  const recipients = getAlertRecipients();
+  if (recipients.length === 0) {
+    Logger.log('Missing rolls found but no Alert Recipients configured.');
+    return;
+  }
+  sendMissingRollEmail(recipients, missing, false);
+}
+
+function checkMissingRollsEvening() { emailMissingRolls(true); }   // 8pm — includes today
+function checkMissingRollsMorning() { emailMissingRolls(false); }  // 7am — through yesterday
+
+// ---- One-time setup ----
+
+function setupReminderTabs() {
+  const ss = SpreadsheetApp.openById(ROSTER_SHEET_ID);
+
+  if (!ss.getSheetByName('Clinic Schedule')) {
+    const s = ss.insertSheet('Clinic Schedule');
+    s.appendRow(['Clinic Name', 'Days (e.g. Tue, Wed, Thu)']);
+    s.appendRow(['Red Ball', 'Wed']);
+    s.appendRow(['Orange Ball', 'Wed']);
+    s.appendRow(['Green Ball', 'Wed']);
+    s.appendRow(['MS Yellow Ball', 'Tue, Wed, Thu']);
+    s.appendRow(['HS Yellow Ball', 'Tue, Wed, Thu']);
+    s.getRange(1, 1, 1, 2).setFontWeight('bold').setBackground('#021f3d').setFontColor('white');
+    s.setColumnWidth(1, 180); s.setColumnWidth(2, 230); s.setFrozenRows(1);
+  }
+
+  if (!ss.getSheetByName('Alert Recipients')) {
+    const r = ss.insertSheet('Alert Recipients');
+    r.appendRow(['Name', 'Email']);
+    r.appendRow(['J.C.', 'jcdfreeman@gmail.com']);
+    r.getRange(1, 1, 1, 2).setFontWeight('bold').setBackground('#021f3d').setFontColor('white');
+    r.setColumnWidth(1, 150); r.setColumnWidth(2, 260); r.setFrozenRows(1);
+  }
+
+  if (!ss.getSheetByName('Reminder Settings')) {
+    const t = ss.insertSheet('Reminder Settings');
+    t.appendRow(['Setting', 'Value']);
+    t.appendRow(['Reminders On?', 'Yes']);
+    t.getRange(1, 1, 1, 2).setFontWeight('bold').setBackground('#021f3d').setFontColor('white');
+    t.setColumnWidth(1, 180); t.setColumnWidth(2, 120); t.setFrozenRows(1);
+  }
+
+  Logger.log('Reminder tabs ready in the roster spreadsheet.');
+}
+
+function setupMissingRollTriggers() {
+  const triggers = ScriptApp.getProjectTriggers();
+  for (const t of triggers) {
+    const fn = t.getHandlerFunction();
+    if (fn === 'checkMissingRollsEvening' || fn === 'checkMissingRollsMorning') {
+      ScriptApp.deleteTrigger(t);
+    }
+  }
+  ScriptApp.newTrigger('checkMissingRollsEvening').timeBased().everyDays(1).atHour(20).create();
+  ScriptApp.newTrigger('checkMissingRollsMorning').timeBased().everyDays(1).atHour(7).create();
+  Logger.log('Missing-roll triggers set: 8pm (evening) + 7am (morning).');
+}
+
+// ---- "Roll Reminders" menu handlers ----
+
+function menuTestReminder() {
+  const ui = SpreadsheetApp.getUi();
+  const recipients = getAlertRecipients();
+  if (recipients.length === 0) {
+    ui.alert('No recipients yet. Add at least one email to the "Alert Recipients" tab, then try again.');
+    return;
+  }
+  const missing = getCurrentMissingRolls();
+  if (missing.length === 0) {
+    MailApp.sendEmail({
+      to: recipients.join(','),
+      subject: '[TEST] ✅ Roll reminder system is working',
+      htmlBody: '<div style="font-family:Arial,sans-serif;"><h2 style="color:#2e7d32;">✅ Test successful</h2>' +
+        '<p>Your missing-roll reminder system is set up and can email you. Nothing is currently missing.</p></div>'
+    });
+  } else {
+    sendMissingRollEmail(recipients, missing, true);
+  }
+  ui.alert('Test alert sent to: ' + recipients.join(', '));
+}
+
+function menuCheckMissingNow() {
+  const ui = SpreadsheetApp.getUi();
+  if (!remindersEnabled()) {
+    ui.alert('Reminders are currently OFF. Set "Reminders On?" to Yes in the "Reminder Settings" tab.');
+    return;
+  }
+  const missing = getCurrentMissingRolls();
+  if (missing.length === 0) {
+    ui.alert('✅ All caught up — no missing rolls.');
+    return;
+  }
+  const recipients = getAlertRecipients();
+  if (recipients.length === 0) {
+    ui.alert('Found ' + missing.length + ' missing roll(s), but no recipients are set in the "Alert Recipients" tab.');
+    return;
+  }
+  sendMissingRollEmail(recipients, missing, false);
+  ui.alert('Sent an alert for ' + missing.length + ' missing roll(s) to: ' + recipients.join(', '));
+}
+
+function menuShowMissing() {
+  const ui = SpreadsheetApp.getUi();
+  const missing = getCurrentMissingRolls();
+  if (missing.length === 0) {
+    ui.alert('✅ All caught up — no missing rolls.');
+    return;
+  }
+  let txt = 'Missing rolls (scheduled but not logged):\n\n';
+  for (const m of missing) txt += '• ' + m.day + ' ' + m.date + ' — ' + m.clinic + '\n';
+  ui.alert(txt);
 }
