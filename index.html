@@ -364,9 +364,9 @@
             display: block;
         }
 
-        /* Bottom padding for fixed submit bar */
+        /* Bottom padding for fixed submit bar (bar + counter line + safe area) */
         .roll-screen-content {
-            padding-bottom: 80px;
+            padding-bottom: calc(170px + env(safe-area-inset-bottom));
         }
 
         /* Player count summary */
@@ -741,6 +741,18 @@
                 <input type="date" id="roll-date-input" class="date-picker-input">
             </div>
 
+            <label class="no-staffing-label" style="padding: 0 0 8px 0;">
+                <input type="checkbox" id="cancelled-checkbox" onchange="toggleCancelled()">
+                <span><strong>Clinic Cancelled</strong> (rain-out, holiday, etc.)</span>
+            </label>
+            <div id="cancel-reason-bar" style="display:none; margin-bottom: 12px;">
+                <select id="cancel-reason" class="add-player-type" style="width:100%;">
+                    <option value="Weather">Weather / Rain-out</option>
+                    <option value="Holiday">Holiday</option>
+                    <option value="Other">Other</option>
+                </select>
+            </div>
+
             <div class="section-title">Players <span id="player-counter" class="counter"></span></div>
             <label class="no-staffing-label">
                 <input type="checkbox" id="no-attendees-checkbox" onchange="toggleNoAttendees()">
@@ -1071,12 +1083,16 @@
             document.getElementById('roll-date-input').value = `${yyyy}-${mm}-${dd}`;
             updateHeaderDate();
 
-            // Clear the add inputs and reset No Staffing
+            // Clear the add inputs and reset all checkboxes
             document.getElementById('add-coach-input').value = '';
             document.getElementById('add-player-input').value = '';
+            document.getElementById('cancelled-checkbox').checked = false;
+            document.getElementById('cancel-reason-bar').style.display = 'none';
             document.getElementById('no-staffing-checkbox').checked = false;
+            document.getElementById('no-staffing-checkbox').disabled = false;
             document.getElementById('coaches-section').classList.remove('disabled');
             document.getElementById('no-attendees-checkbox').checked = false;
+            document.getElementById('no-attendees-checkbox').disabled = false;
             document.getElementById('players-section').classList.remove('disabled');
 
             renderCoaches();
@@ -1168,6 +1184,37 @@
                 });
             } else {
                 section.classList.remove('disabled');
+            }
+            updateSubmitButton();
+        }
+
+        function toggleCancelled() {
+            const checked = document.getElementById('cancelled-checkbox').checked;
+            const reasonBar = document.getElementById('cancel-reason-bar');
+            const playersSection = document.getElementById('players-section');
+            const coachesSection = document.getElementById('coaches-section');
+            const noAttendees = document.getElementById('no-attendees-checkbox');
+            const noStaffing = document.getElementById('no-staffing-checkbox');
+
+            if (checked) {
+                reasonBar.style.display = '';
+                playersSection.classList.add('disabled');
+                coachesSection.classList.add('disabled');
+                // Cancelled supersedes everything — clear selections and lock the other checkboxes
+                document.querySelectorAll('#players-list .checklist-item.checked, #coaches-list .checklist-item.checked')
+                    .forEach(item => item.classList.remove('checked'));
+                noAttendees.checked = false;
+                noAttendees.disabled = true;
+                noStaffing.checked = false;
+                noStaffing.disabled = true;
+                updatePlayerCounter();
+            } else {
+                reasonBar.style.display = 'none';
+                playersSection.classList.remove('disabled');
+                coachesSection.classList.remove('disabled');
+                noAttendees.disabled = false;
+                noStaffing.disabled = false;
+                updatePlayerCounter();
             }
             updateSubmitButton();
         }
@@ -1339,7 +1386,8 @@
             const bottomCounter = document.getElementById('bottom-counter');
             if (bottomCounter) {
                 const noAttendees = document.getElementById('no-attendees-checkbox').checked;
-                if (noAttendees) {
+                const cancelled = document.getElementById('cancelled-checkbox').checked;
+                if (noAttendees || cancelled) {
                     bottomCounter.textContent = '';
                 } else {
                     bottomCounter.textContent = `${checked.length} of ${items.length} players selected`;
@@ -1349,13 +1397,17 @@
 
         // ==================== SUBMIT ====================
         function updateSubmitButton() {
+            const cancelled = document.getElementById('cancelled-checkbox').checked;
             const noStaffing = document.getElementById('no-staffing-checkbox').checked;
             const noAttendees = document.getElementById('no-attendees-checkbox').checked;
             const coaches = document.querySelectorAll('#coaches-list .checklist-item.checked');
             const players = document.querySelectorAll('#players-list .checklist-item.checked');
             const btn = document.getElementById('submit-btn');
 
-            if (!noStaffing && coaches.length === 0) {
+            if (cancelled) {
+                btn.disabled = false;
+                btn.textContent = 'Submit — Clinic Cancelled';
+            } else if (!noStaffing && coaches.length === 0) {
                 btn.disabled = true;
                 btn.textContent = 'Select at least one coach';
             } else if (noAttendees) {
@@ -1391,28 +1443,30 @@
             const dateParts = document.getElementById('roll-date-input').value.split('-');
             const dateStr = `${dateParts[1]}/${dateParts[2]}/${dateParts[0]}`;
 
+            const cancelled = document.getElementById('cancelled-checkbox').checked;
             const noStaffing = document.getElementById('no-staffing-checkbox').checked;
-            let coaches, newCoaches;
+            let coaches = [], newCoaches = [], players = [];
 
-            if (noStaffing) {
-                coaches = ['No Staffing'];
-                newCoaches = [];
-            } else {
-                const coachItems = document.querySelectorAll('#coaches-list .checklist-item.checked');
-                coaches = Array.from(coachItems).map(item => ({
+            if (!cancelled) {
+                if (noStaffing) {
+                    coaches = ['No Staffing'];
+                } else {
+                    const coachItems = document.querySelectorAll('#coaches-list .checklist-item.checked');
+                    coaches = Array.from(coachItems).map(item => ({
+                        name: item.querySelector('.name').textContent,
+                        hours: parseFloat(item.getAttribute('data-hours') || '1')
+                    }));
+                    newCoaches = Array.from(coachItems)
+                        .filter(item => item.querySelector('.added-tag'))
+                        .map(item => item.querySelector('.name').textContent);
+                }
+
+                const checkedItems = document.querySelectorAll('#players-list .checklist-item.checked');
+                players = Array.from(checkedItems).map(item => ({
                     name: item.querySelector('.name').textContent,
-                    hours: parseFloat(item.getAttribute('data-hours') || '1')
+                    status: item.getAttribute('data-status') || 'M'
                 }));
-                newCoaches = Array.from(coachItems)
-                    .filter(item => item.querySelector('.added-tag'))
-                    .map(item => item.querySelector('.name').textContent);
             }
-
-            const checkedItems = document.querySelectorAll('#players-list .checklist-item.checked');
-            const players = Array.from(checkedItems).map(item => ({
-                name: item.querySelector('.name').textContent,
-                status: item.getAttribute('data-status') || 'M'
-            }));
 
             const payload = {
                 date: dateStr,
@@ -1421,7 +1475,9 @@
                 coaches: coaches,
                 newCoaches: newCoaches,
                 players: players,
-                noAttendees: noAttendees
+                noAttendees: noAttendees,
+                cancelled: cancelled,
+                cancelReason: cancelled ? document.getElementById('cancel-reason').value : ''
             };
 
             try {
@@ -1435,7 +1491,13 @@
                 const result = await response.json();
 
                 if (result.success) {
-                    showSuccess(noAttendees ? 0 : players.length, coaches);
+                    if (cancelled) {
+                        document.getElementById('success-message').textContent =
+                            `${selectedClinic.display} marked as cancelled (${payload.cancelReason}).`;
+                        document.getElementById('success-overlay').classList.add('active');
+                    } else {
+                        showSuccess(noAttendees ? 0 : players.length, coaches);
+                    }
                 } else {
                     throw new Error(result.error || 'Unknown server error');
                 }

@@ -72,6 +72,16 @@ function doPost(e) {
       sheet.setFrozenRows(1);
     }
 
+    // Clinic cancelled (rain-out / holiday) — record a single marker row.
+    // This clears the missing-roll flag for the day; reports skip these rows.
+    if (data.cancelled) {
+      const reason = (data.cancelReason || 'Other').toString();
+      sheet.appendRow([date, clinic, '', 'Clinic Cancelled (' + reason + ')', '']);
+      return ContentService
+        .createTextOutput(JSON.stringify({ success: true, cancelled: true }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
     // coaches may be strings (legacy/No Staffing) or { name, hours } objects
     const coachesStr = coaches.map(c =>
       typeof c === 'string' ? c : `${c.name} (${c.hours}h)`
@@ -124,7 +134,7 @@ function doGet(e) {
       .setMimeType(ContentService.MimeType.JSON);
   }
   return ContentService
-    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'reminders-v1' }))
+    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'clinic-cancel-v1' }))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -290,6 +300,7 @@ function getAttendanceForMonth(billingMonth, billingYear) {
 
       if (!playerName || !clinic) continue;
       if (String(playerName).trim() === 'No Attendees') continue;
+      if (String(playerName).trim().indexOf('Clinic Cancelled') === 0) continue;
       if (rowDate.getMonth() + 1 !== billingMonth || rowDate.getFullYear() !== billingYear) continue;
 
       rows.push({ date: rowDate, clinic: clinic, playerName: playerName, status: status });
@@ -409,6 +420,7 @@ function getAttendanceWithCoachesForMonth(billingMonth, billingYear) {
 
       if (!playerName || !clinic) continue;
       if (String(playerName).trim() === 'No Attendees') continue;
+      if (String(playerName).trim().indexOf('Clinic Cancelled') === 0) continue;
       if (rowDate.getMonth() + 1 !== billingMonth || rowDate.getFullYear() !== billingYear) continue;
 
       rows.push({ date: rowDate, clinic: clinic, playerName: playerName, status: status });
@@ -1335,14 +1347,15 @@ function getCurrentMissingRolls() {
 
 function sendMissingRollEmail(recipients, missing, isTest) {
   const n = missing.length;
-  const subject = (isTest ? '[TEST] ' : '') + '⚠️ Missing Roll Alert — ' +
-    n + ' clinic' + (n !== 1 ? 's' : '') + ' need attendance';
+  // Subject must stay plain ASCII — emoji and special dashes get garbled by mail clients
+  const subject = (isTest ? '[TEST] ' : '') + 'Missing Roll Alert - ' +
+    n + (n !== 1 ? ' clinics need' : ' clinic needs') + ' attendance';
 
   let html = '<div style="font-family:Arial,sans-serif;color:#333;">';
-  html += '<h2 style="color:#c62828;margin-bottom:4px;">⚠️ Missing Roll' + (n !== 1 ? 's' : '') + '</h2>';
+  html += '<h2 style="color:#c62828;margin-bottom:4px;">&#9888;&#65039; Missing Roll' + (n !== 1 ? 's' : '') + '</h2>';
   html += '<p>These scheduled clinics have <strong>no attendance logged</strong>:</p><ul>';
   for (const m of missing) {
-    html += '<li><strong>' + m.day + ' ' + m.date + '</strong> — ' + m.clinic + '</li>';
+    html += '<li><strong>' + m.day + ' ' + m.date + '</strong> &mdash; ' + m.clinic + '</li>';
   }
   html += '</ul>';
   html += '<p><a href="' + ROLL_APP_URL + '" style="display:inline-block;background:#021f3d;color:#fff;' +
@@ -1437,8 +1450,8 @@ function menuTestReminder() {
   if (missing.length === 0) {
     MailApp.sendEmail({
       to: recipients.join(','),
-      subject: '[TEST] ✅ Roll reminder system is working',
-      htmlBody: '<div style="font-family:Arial,sans-serif;"><h2 style="color:#2e7d32;">✅ Test successful</h2>' +
+      subject: '[TEST] Roll reminder system is working',
+      htmlBody: '<div style="font-family:Arial,sans-serif;"><h2 style="color:#2e7d32;">&#9989; Test successful</h2>' +
         '<p>Your missing-roll reminder system is set up and can email you. Nothing is currently missing.</p></div>'
     });
   } else {
