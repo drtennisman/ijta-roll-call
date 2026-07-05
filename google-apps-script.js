@@ -134,7 +134,7 @@ function doGet(e) {
       .setMimeType(ContentService.MimeType.JSON);
   }
   return ContentService
-    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'clinic-cancel-v1' }))
+    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'families-autofill-v1' }))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -449,6 +449,213 @@ function getAttendanceWithCoachesForMonth(billingMonth, billingYear) {
 }
 
 // ============================================================
+// SIBLING DISCOUNT (10% off every sibling except the highest-priced)
+// ============================================================
+// Siblings are matched by last name WITHIN each clinic. The self-filling
+// "Families" tab in the roster spreadsheet manages the exceptions:
+//   Players (Last, First; Last, First) | Siblings? (Yes/No) | Clinic (auto)
+// It auto-populates with every detected same-last-name group (Siblings? =
+// Yes). Flip a row to "No" to un-link an accidental match (two unrelated
+// families sharing a last name), or add a row by hand for real siblings
+// with DIFFERENT last names. The highest-priced sibling pays full; the
+// rest get 10% off.
+// ============================================================
+
+// Clinic roster tab names in the ROSTER spreadsheet (match the app's CLINICS)
+const CLINIC_ROSTER_TABS = ['Red Ball', 'Orange Ball', 'Green Ball', 'Middle School', 'High School', 'Bruno'];
+
+function getSiblingOverrides() {
+  const result = { notPairs: {}, families: [] };
+  const sheet = SpreadsheetApp.openById(ROSTER_SHEET_ID).getSheetByName('Families');
+  if (!sheet) return result;
+
+  const data = sheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    const namesStr = (data[i][0] || '').toString().trim();
+    if (!namesStr) continue;
+    // Names are "Last, First" so entries are separated by semicolons
+    const names = namesStr.split(';').map(s => s.trim().toLowerCase()).filter(Boolean);
+    if (names.length < 2) continue;
+
+    const answer = (data[i][1] || '').toString().trim().toLowerCase();
+    const isNo = (answer === 'no' || answer === 'n' || answer === 'false');
+    if (isNo) {
+      // Not siblings — break any auto-match between these names
+      for (let a = 0; a < names.length; a++) {
+        for (let b = a + 1; b < names.length; b++) {
+          result.notPairs[[names[a], names[b]].sort().join('|||')] = true;
+        }
+      }
+    } else {
+      // Confirmed siblings (covers cross-last-name families; harmless if same-name)
+      result.families.push(names);
+    }
+  }
+  return result;
+}
+
+// Groups one clinic's billing rows into families and applies the discount.
+// Mutates each row: adds discount, finalTotal, siblingNote, isSibling.
+// Returns the total discount given.
+function applySiblingDiscounts(rows, overrides) {
+  const n = rows.length;
+  const parent = [];
+  for (let i = 0; i < n; i++) parent.push(i);
+  const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+  const union = (a, b) => { const ra = find(a), rb = find(b); if (ra !== rb) parent[ra] = rb; };
+  const lowerNames = rows.map(r => r.name.toLowerCase());
+  const pairKey = (a, b) => [a, b].sort().join('|||');
+
+  // Same last name = same family, unless marked "Not Siblings"
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      if (rows[i].lastName.toLowerCase() !== rows[j].lastName.toLowerCase()) continue;
+      if (overrides.notPairs[pairKey(lowerNames[i], lowerNames[j])]) continue;
+      union(i, j);
+    }
+  }
+  // Explicit "Siblings" rows (different last names)
+  for (const family of overrides.families) {
+    const present = [];
+    for (let i = 0; i < n; i++) {
+      if (family.indexOf(lowerNames[i]) !== -1) present.push(i);
+    }
+    for (let k = 1; k < present.length; k++) union(present[0], present[k]);
+  }
+
+  const groups = {};
+  for (let i = 0; i < n; i++) {
+    const root = find(i);
+    if (!groups[root]) groups[root] = [];
+    groups[root].push(i);
+  }
+
+  let totalDiscount = 0;
+  rows.forEach(r => { r.discount = 0; r.finalTotal = r.total; r.siblingNote = ''; r.isSibling = false; });
+
+  for (const g in groups) {
+    const members = groups[g];
+    if (members.length < 2) continue;
+    // Highest total pays full (ties broken alphabetically for consistency)
+    members.sort((a, b) => rows[b].total - rows[a].total || rows[a].name.localeCompare(rows[b].name));
+    rows[members[0]].siblingNote = 'Sibling - full price';
+    rows[members[0]].isSibling = true;
+    for (let k = 1; k < members.length; k++) {
+      const r = rows[members[k]];
+      r.discount = Math.round(r.total * 10) / 100;
+      r.finalTotal = Math.round((r.total - r.discount) * 100) / 100;
+      r.siblingNote = 'SIBLING DISCOUNT (-10%)';
+      r.isSibling = true;
+      totalDiscount += r.discount;
+    }
+  }
+  return totalDiscount;
+}
+
+// Builds discounted billing rows for one clinic from raw player data.
+// players: [{ name, status ('M'|'G'|'S'), sessions }]
+// Returns { rows, gross, totalDiscount, net } — rows sorted by name.
+function buildClinicBillingRows(clinic, players, overrides) {
+  const rows = [];
+  for (const p of players) {
+    const total = getTotalCharge(clinic, p.status, p.sessions);
+    rows.push({
+      name: p.name,
+      status: p.status === 'G' ? 'Guest' : p.status === 'S' ? 'Social' : 'Member',
+      sessions: p.sessions,
+      total: total,
+      lastName: p.name.split(',')[0].trim()
+    });
+  }
+  rows.sort((a, b) => a.name.localeCompare(b.name));
+  const totalDiscount = applySiblingDiscounts(rows, overrides);
+  let gross = 0, net = 0;
+  rows.forEach(r => { gross += r.total; net += r.finalTotal; });
+  return { rows: rows, gross: gross, totalDiscount: totalDiscount, net: net };
+}
+
+// Self-fills the "Families" tab: scans every clinic roster, finds groups
+// of 2+ players sharing a last name, and APPENDS any not already listed
+// (Siblings? = "Yes"). Existing rows — and your Yes/No answers — are never
+// touched. Runs automatically at billing time and on demand from the menu.
+// Returns the number of new families added.
+function updateFamiliesList() {
+  const ss = SpreadsheetApp.openById(ROSTER_SHEET_ID);
+  let sheet = ss.getSheetByName('Families');
+  if (!sheet) {
+    sheet = ss.insertSheet('Families');
+    sheet.appendRow(['Players (siblings share these)', 'Siblings? (Yes/No)', 'Clinic (auto)']);
+    sheet.getRange(1, 1, 1, 3).setFontWeight('bold').setBackground('#021f3d').setFontColor('white');
+    sheet.setColumnWidth(1, 320);
+    sheet.setColumnWidth(2, 130);
+    sheet.setColumnWidth(3, 170);
+    sheet.setFrozenRows(1);
+  }
+
+  // Existing entries, keyed by the sorted lowercase set of names
+  const data = sheet.getDataRange().getValues();
+  const existing = {};
+  for (let i = 1; i < data.length; i++) {
+    const names = (data[i][0] || '').toString().split(';')
+      .map(s => s.trim().toLowerCase()).filter(Boolean).sort();
+    if (names.length) existing[names.join('|||')] = true;
+  }
+
+  // Detect candidate families per clinic roster (same last name, 2+ kids)
+  const candidates = {}; // key -> { players: [display], clinics: {} }
+  for (const tab of CLINIC_ROSTER_TABS) {
+    const rs = ss.getSheetByName(tab);
+    if (!rs) continue;
+    const rd = rs.getDataRange().getValues();
+    const byLast = {};
+    for (let i = 1; i < rd.length; i++) {
+      const last = (rd[i][0] || '').toString().trim();
+      const first = (rd[i][1] || '').toString().trim();
+      if (!last && !first) continue;
+      const lk = last.toLowerCase();
+      if (!lk) continue;
+      const display = first ? last + ', ' + first : last;
+      (byLast[lk] = byLast[lk] || []).push(display);
+    }
+    for (const lk in byLast) {
+      if (byLast[lk].length < 2) continue;
+      const players = byLast[lk].slice().sort();
+      const key = players.map(p => p.toLowerCase()).join('|||');
+      if (!candidates[key]) candidates[key] = { players: players, clinics: {} };
+      candidates[key].clinics[tab] = true;
+    }
+  }
+
+  // Append only genuinely new families
+  let added = 0;
+  for (const key in candidates) {
+    if (existing[key]) continue;
+    const c = candidates[key];
+    sheet.appendRow([c.players.join('; '), 'Yes', Object.keys(c.clinics).join(', ')]);
+    added++;
+  }
+
+  // Keep the Yes/No column a simple dropdown
+  const lastRow = sheet.getLastRow();
+  if (lastRow > 1) {
+    const rule = SpreadsheetApp.newDataValidation().requireValueInList(['Yes', 'No'], true).build();
+    sheet.getRange(2, 2, lastRow - 1, 1).setDataValidation(rule);
+  }
+
+  Logger.log('Families list updated: ' + added + ' new famil' + (added === 1 ? 'y' : 'ies') + ' added.');
+  return added;
+}
+
+// Menu handler: refresh the Families list and report what was added.
+function menuUpdateFamilies() {
+  const added = updateFamiliesList();
+  SpreadsheetApp.getUi().alert(added === 0
+    ? 'Families list is up to date — no new families found.'
+    : 'Added ' + added + ' new famil' + (added === 1 ? 'y' : 'ies') +
+      ' to the Families tab (set to "Yes"). Review and flip any to "No" if they are not actually siblings.');
+}
+
+// ============================================================
 // MONTHLY BILLING REPORT
 // ============================================================
 // Generates a billing summary in a separate Google Sheet.
@@ -538,39 +745,18 @@ function generateMonthlyBilling(monthOverride, yearOverride) {
     cd[row.playerName].sessions++;
   }
 
+  updateFamiliesList();  // self-fill the Families tab before applying discounts
   const billingSS = SpreadsheetApp.openById(BILLING_SHEET_ID);
+  const siblingOverrides = getSiblingOverrides();
 
   for (const clinic in clinicData) {
     const playerMap = clinicData[clinic];
 
-    // Build billing rows for this clinic
-    const lastNames = {};
-    const billingRows = [];
-
-    for (const key in playerMap) {
-      const p = playerMap[key];
-      const total = getTotalCharge(clinic, p.status, p.sessions);
-      const lastName = p.name.split(',')[0].trim();
-
-      if (!lastNames[lastName]) lastNames[lastName] = [];
-      lastNames[lastName].push(p.name);
-
-      billingRows.push({
-        name: p.name,
-        status: p.status === 'G' ? 'Guest' : p.status === 'S' ? 'Social' : 'Member',
-        sessions: p.sessions,
-        total: total,
-        lastName: lastName
-      });
-    }
-
-    // Flag siblings within this clinic
-    const siblingLastNames = {};
-    for (const ln in lastNames) {
-      if ([...new Set(lastNames[ln])].length > 1) siblingLastNames[ln] = true;
-    }
-
-    billingRows.sort((a, b) => a.name.localeCompare(b.name));
+    // Build billing rows with sibling discounts applied automatically
+    const players = [];
+    for (const key in playerMap) players.push(playerMap[key]);
+    const billing = buildClinicBillingRows(clinic, players, siblingOverrides);
+    const billingRows = billing.rows;
 
     const tabName = clinic + ' - Billing - ' + monthName;
     let sheet = billingSS.getSheetByName(tabName);
@@ -578,7 +764,7 @@ function generateMonthlyBilling(monthOverride, yearOverride) {
     sheet = billingSS.insertSheet(tabName);
 
     // Header
-    const headers = ['Player Name', 'Status', 'Sessions', 'Total Charged', 'Sibling Discount Note'];
+    const headers = ['Player Name', 'Status', 'Sessions', 'Total', 'Sibling Discount', 'Final Charge', 'Note'];
     sheet.appendRow(headers);
     const headerRange = sheet.getRange(1, 1, 1, headers.length);
     headerRange.setFontWeight('bold');
@@ -592,15 +778,17 @@ function generateMonthlyBilling(monthOverride, yearOverride) {
         row.status,
         row.sessions,
         row.total,
-        siblingLastNames[row.lastName] ? 'CHECK FOR SIBLING DISCOUNT' : ''
+        row.discount > 0 ? row.discount : '',
+        row.finalTotal,
+        row.siblingNote
       ]);
     }
 
-    // Format currency and highlight siblings
+    // Format currency and highlight sibling families
     if (billingRows.length > 0) {
-      sheet.getRange(2, 4, billingRows.length, 1).setNumberFormat('$#,##0.00');
+      sheet.getRange(2, 4, billingRows.length, 3).setNumberFormat('$#,##0.00');
       for (let i = 0; i < billingRows.length; i++) {
-        if (siblingLastNames[billingRows[i].lastName]) {
+        if (billingRows[i].isSibling) {
           sheet.getRange(i + 2, 1, 1, headers.length).setBackground('#fff9c4');
         }
       }
@@ -610,8 +798,10 @@ function generateMonthlyBilling(monthOverride, yearOverride) {
     sheet.setColumnWidth(1, 200);
     sheet.setColumnWidth(2, 80);
     sheet.setColumnWidth(3, 80);
-    sheet.setColumnWidth(4, 120);
-    sheet.setColumnWidth(5, 250);
+    sheet.setColumnWidth(4, 100);
+    sheet.setColumnWidth(5, 130);
+    sheet.setColumnWidth(6, 110);
+    sheet.setColumnWidth(7, 220);
     sheet.setFrozenRows(1);
 
     // Summary at bottom
@@ -620,12 +810,20 @@ function generateMonthlyBilling(monthOverride, yearOverride) {
     sheet.getRange(summaryStartRow, 1).setFontWeight('bold');
     sheet.getRange(summaryStartRow + 1, 1).setValue('Total Players:');
     sheet.getRange(summaryStartRow + 1, 2).setValue(billingRows.length);
-    sheet.getRange(summaryStartRow + 2, 1).setValue('Total Revenue:');
-    const totalRevenue = billingRows.reduce((sum, r) => sum + r.total, 0);
-    sheet.getRange(summaryStartRow + 2, 2).setValue(totalRevenue);
+    sheet.getRange(summaryStartRow + 2, 1).setValue('Gross Revenue:');
+    sheet.getRange(summaryStartRow + 2, 2).setValue(billing.gross);
     sheet.getRange(summaryStartRow + 2, 2).setNumberFormat('$#,##0.00');
+    sheet.getRange(summaryStartRow + 3, 1).setValue('Sibling Discounts:');
+    sheet.getRange(summaryStartRow + 3, 2).setValue(-billing.totalDiscount);
+    sheet.getRange(summaryStartRow + 3, 2).setNumberFormat('$#,##0.00');
+    sheet.getRange(summaryStartRow + 4, 1).setValue('Net Revenue:');
+    sheet.getRange(summaryStartRow + 4, 2).setValue(billing.net);
+    sheet.getRange(summaryStartRow + 4, 2).setNumberFormat('$#,##0.00');
+    sheet.getRange(summaryStartRow + 4, 1, 1, 2).setFontWeight('bold');
 
-    Logger.log('Billing report generated for ' + clinic + ': ' + billingRows.length + ' players, $' + totalRevenue);
+    Logger.log('Billing report generated for ' + clinic + ': ' + billingRows.length +
+      ' players, gross $' + billing.gross + ', discounts $' + billing.totalDiscount +
+      ', net $' + billing.net);
   }
 }
 
@@ -745,18 +943,21 @@ function generateAttendanceSummary(monthOverride, yearOverride) {
     clinicSheet.getRange(currentRow, 2).setValue(uniquePlayers.length);
     currentRow++;
 
-    // Calculate revenue for this clinic
-    let clinicRevenue = 0;
+    // Calculate revenue for this clinic (net of sibling discounts)
     const playerSessions = {};
     for (const dateStr of sortedDates) {
       for (const player of cd.dates[dateStr]) {
         playerSessions[player] = (playerSessions[player] || 0) + 1;
       }
     }
-    for (const player in playerSessions) {
-      const status = cd.playerStatus[player] || 'M';
-      clinicRevenue += getTotalCharge(clinic, status, playerSessions[player]);
-    }
+    const revBilling = buildClinicBillingRows(clinic,
+      Object.keys(playerSessions).map(p => ({
+        name: p,
+        status: cd.playerStatus[p] || 'M',
+        sessions: playerSessions[p]
+      })),
+      getSiblingOverrides());
+    const clinicRevenue = revBilling.net;
 
     clinicSheet.getRange(currentRow, 1).setValue('Total Revenue:');
     clinicSheet.getRange(currentRow, 2).setValue(clinicRevenue);
@@ -818,6 +1019,7 @@ function generateAttendanceAndStaffingSummary(monthOverride, yearOverride) {
   // Read config data from roster spreadsheet
   const coachRates = getCoachRates();
   const sessionDurations = getClinicSessionDurations();
+  const siblingOverrides = getSiblingOverrides();
 
   // Organize data by clinic
   const clinicData = {};
@@ -927,14 +1129,14 @@ function generateAttendanceAndStaffingSummary(monthOverride, yearOverride) {
     sheet.getRange(currentRow, 1).setFontSize(11);
     currentRow++;
 
-    const revenueHeaders = ['Player', 'Status', 'Sessions', 'Total Charged'];
+    const revenueHeaders = ['Player', 'Status', 'Sessions', 'Total', 'Sibling Discount', 'Final'];
     sheet.getRange(currentRow, 1, 1, revenueHeaders.length).setValues([revenueHeaders]);
     sheet.getRange(currentRow, 1, 1, revenueHeaders.length).setFontWeight('bold');
     sheet.getRange(currentRow, 1, 1, revenueHeaders.length).setBackground('#1565c0');
     sheet.getRange(currentRow, 1, 1, revenueHeaders.length).setFontColor('white');
     currentRow++;
 
-    // Calculate per-player revenue
+    // Calculate per-player revenue with sibling discounts applied
     const playerSessions = {};
     for (const dateStr of sortedDates) {
       for (const player of cd.dates[dateStr]) {
@@ -942,36 +1144,37 @@ function generateAttendanceAndStaffingSummary(monthOverride, yearOverride) {
       }
     }
 
-    let totalRevenue = 0;
-    const playerNames = Object.keys(playerSessions).sort();
+    const revBilling = buildClinicBillingRows(clinic,
+      Object.keys(playerSessions).map(p => ({
+        name: p,
+        status: cd.playerStatus[p] || 'M',
+        sessions: playerSessions[p]
+      })),
+      siblingOverrides);
+    const totalRevenue = revBilling.net;
     const revenueStartRow = currentRow;
 
-    for (const player of playerNames) {
-      const status = cd.playerStatus[player] || 'M';
-      const sessions = playerSessions[player];
-      const charge = getTotalCharge(clinic, status, sessions);
-      totalRevenue += charge;
-
-      const statusLabel = status === 'G' ? 'Guest' : status === 'S' ? 'Social' : 'Member';
-
-      sheet.getRange(currentRow, 1).setValue(player);
-      sheet.getRange(currentRow, 2).setValue(statusLabel);
-      sheet.getRange(currentRow, 3).setValue(sessions);
-      sheet.getRange(currentRow, 4).setValue(charge);
+    for (const r of revBilling.rows) {
+      sheet.getRange(currentRow, 1).setValue(r.name);
+      sheet.getRange(currentRow, 2).setValue(r.status);
+      sheet.getRange(currentRow, 3).setValue(r.sessions);
+      sheet.getRange(currentRow, 4).setValue(r.total);
+      if (r.discount > 0) sheet.getRange(currentRow, 5).setValue(-r.discount);
+      sheet.getRange(currentRow, 6).setValue(r.finalTotal);
       currentRow++;
     }
 
     // Format charges as currency
-    if (playerNames.length > 0) {
-      sheet.getRange(revenueStartRow, 4, playerNames.length, 1).setNumberFormat('$#,##0.00');
+    if (revBilling.rows.length > 0) {
+      sheet.getRange(revenueStartRow, 4, revBilling.rows.length, 3).setNumberFormat('$#,##0.00');
     }
 
-    // Total revenue row
+    // Total revenue row (net of sibling discounts)
     sheet.getRange(currentRow, 1).setValue('TOTAL REVENUE');
     sheet.getRange(currentRow, 1).setFontWeight('bold');
-    sheet.getRange(currentRow, 4).setValue(totalRevenue);
-    sheet.getRange(currentRow, 4).setNumberFormat('$#,##0.00');
-    sheet.getRange(currentRow, 4).setFontWeight('bold');
+    sheet.getRange(currentRow, 6).setValue(totalRevenue);
+    sheet.getRange(currentRow, 6).setNumberFormat('$#,##0.00');
+    sheet.getRange(currentRow, 6).setFontWeight('bold');
     currentRow += 2;
 
     // === SECTION 3: STAFFING COSTS ===
@@ -1115,6 +1318,8 @@ function onOpen() {
     .addSeparator()
     .addItem('Generate Last Month — Billing Only', 'menuLastMonthBilling')
     .addItem('Generate Last Month — A/S Summary Only', 'menuLastMonthAS')
+    .addSeparator()
+    .addItem('Update Families List', 'menuUpdateFamilies')
     .addToUi();
 
   ui.createMenu('Roll Reminders')
@@ -1214,8 +1419,12 @@ function setupMonthlyTrigger() {
 //
 // EVERYTHING is managed from tabs in the ROSTER spreadsheet
 // (same place as Coaches & Clinic Config) — no code changes needed:
-//   "Clinic Schedule"   — Clinic Name | Days (e.g. "Tue, Wed, Thu")
-//   "Alert Recipients"  — Name | Email
+//   "Clinic Schedule"   — Clinic Name | Days | Owner (coach name)
+//                         (alerts for a missing roll go to that clinic's
+//                          owner, with the email looked up on the Coaches tab)
+//   "Coaches"           — add an "Email" column so names resolve to emails
+//   "Alert Recipients"  — Name | Email (admins: get EVERY alert; also the
+//                         fallback when a clinic has no owner set)
 //   "Reminder Settings" — "Reminders On?" | Yes/No  (master switch)
 //
 // ONE-TIME SETUP (run each once from the editor's Run button):
@@ -1244,10 +1453,24 @@ function remindersEnabled() {
   return true;
 }
 
-function getClinicSchedule() {
+// Reads the Clinic Schedule tab. Supports an optional "Owner" column
+// (located by header name) for targeted alerts, and multiple rows per clinic.
+// Returns: { clinicName: { days: [dayNums], owners: [names] } }
+function getClinicScheduleDetailed() {
   const sheet = SpreadsheetApp.openById(ROSTER_SHEET_ID).getSheetByName('Clinic Schedule');
   if (!sheet) return {};
   const data = sheet.getDataRange().getValues();
+  if (data.length < 2) return {};
+
+  // Locate the optional Owner column by header text
+  let ownerCol = -1;
+  for (let c = 0; c < data[0].length; c++) {
+    if ((data[0][c] || '').toString().toLowerCase().indexOf('owner') !== -1) {
+      ownerCol = c;
+      break;
+    }
+  }
+
   const schedule = {};
   for (let i = 1; i < data.length; i++) {
     const clinic = (data[i][0] || '').toString().trim();
@@ -1257,7 +1480,17 @@ function getClinicSchedule() {
     for (const abbr in DAY_ABBR_TO_NUM) {
       if (daysStr.indexOf(abbr) !== -1) days.push(DAY_ABBR_TO_NUM[abbr]);
     }
-    if (days.length) schedule[clinic] = days;
+    if (!days.length) continue;
+
+    const owner = ownerCol >= 0 ? (data[i][ownerCol] || '').toString().trim() : '';
+
+    if (!schedule[clinic]) schedule[clinic] = { days: [], owners: [] };
+    days.forEach(d => {
+      if (schedule[clinic].days.indexOf(d) === -1) schedule[clinic].days.push(d);
+    });
+    if (owner && schedule[clinic].owners.indexOf(owner) === -1) {
+      schedule[clinic].owners.push(owner);
+    }
   }
   return schedule;
 }
@@ -1272,6 +1505,32 @@ function getAlertRecipients() {
     if (email && email.indexOf('@') !== -1) emails.push(email);
   }
   return emails;
+}
+
+// Maps coach names to emails from the Coaches tab's "Email" column
+// (located by header name). Returns {} if the column doesn't exist yet.
+function getCoachEmails() {
+  const sheet = SpreadsheetApp.openById(ROSTER_SHEET_ID).getSheetByName('Coaches');
+  if (!sheet) return {};
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) return {};
+
+  let emailCol = -1;
+  for (let c = 0; c < data[0].length; c++) {
+    if ((data[0][c] || '').toString().toLowerCase().indexOf('email') !== -1) {
+      emailCol = c;
+      break;
+    }
+  }
+  if (emailCol === -1) return {};
+
+  const map = {};
+  for (let i = 1; i < data.length; i++) {
+    const name = (data[i][0] || '').toString().trim();
+    const email = (data[i][emailCol] || '').toString().trim();
+    if (name && email.indexOf('@') !== -1) map[name.toLowerCase()] = email;
+  }
+  return map;
 }
 
 // ---- Missing-roll detection ----
@@ -1306,7 +1565,7 @@ function getLoggedSet(startDate, endDate) {
 // Returns [{ date: "M/D/YYYY", clinic, day }] for every scheduled
 // clinic-day in range with no roll logged. Never reaches before go-live.
 function getMissingRolls(startDate, endDate) {
-  const schedule = getClinicSchedule();
+  const schedule = getClinicScheduleDetailed();
   if (Object.keys(schedule).length === 0) return [];
 
   const goLive = new Date(REMINDER_GO_LIVE + 'T00:00:00');
@@ -1323,7 +1582,7 @@ function getMissingRolls(startDate, endDate) {
     const wd = d.getDay();
     const dateStr = (d.getMonth() + 1) + '/' + d.getDate() + '/' + d.getFullYear();
     for (const clinic in schedule) {
-      if (schedule[clinic].indexOf(wd) !== -1 && !logged[dateStr + '|||' + clinic]) {
+      if (schedule[clinic].days.indexOf(wd) !== -1 && !logged[dateStr + '|||' + clinic]) {
         missing.push({ date: dateStr, clinic: clinic, day: DAY_NUM_TO_NAME[wd] });
       }
     }
@@ -1376,13 +1635,50 @@ function emailMissingRolls(includeToday) {
 
   const missing = getMissingRolls(new Date(REMINDER_GO_LIVE + 'T00:00:00'), end);
   if (missing.length === 0) return;
+  sendTargetedAlerts(missing, false);
+}
 
-  const recipients = getAlertRecipients();
-  if (recipients.length === 0) {
-    Logger.log('Missing rolls found but no Alert Recipients configured.');
-    return;
+// Routes each missing roll to that clinic's OWNER (email resolved via the
+// Coaches tab "Email" column), plus everyone on Alert Recipients (admins
+// get every alert, and are the safety net when a clinic has no owner set
+// or the owner's email can't be resolved). Each person receives ONE email
+// listing only their clinics. Returns emails sent.
+function sendTargetedAlerts(missing, isTest) {
+  const admins = getAlertRecipients();
+  const coachEmails = getCoachEmails();
+  const schedule = getClinicScheduleDetailed();
+
+  const buckets = {}; // email -> [missing entries]
+  const addTo = (email, m) => {
+    const key = email.toLowerCase();
+    if (!buckets[key]) buckets[key] = [];
+    buckets[key].push(m);
+  };
+
+  for (const m of missing) {
+    const targets = [];
+    const info = schedule[m.clinic];
+    if (info) {
+      info.owners.forEach(name => {
+        const em = coachEmails[name.toLowerCase()];
+        if (em && targets.indexOf(em) === -1) targets.push(em);
+      });
+    }
+    // Admins always get every alert (also covers clinics with no owner set)
+    admins.forEach(a => { if (targets.indexOf(a) === -1) targets.push(a); });
+
+    targets.forEach(em => addTo(em, m));
   }
-  sendMissingRollEmail(recipients, missing, false);
+
+  let sent = 0;
+  for (const email in buckets) {
+    sendMissingRollEmail([email], buckets[email], isTest);
+    sent++;
+  }
+  if (sent === 0) {
+    Logger.log('Missing rolls found but no recipients resolved — check Alert Recipients and the Coaches Email column.');
+  }
+  return sent;
 }
 
 function checkMissingRollsEvening() { emailMissingRolls(true); }   // 8pm — includes today
@@ -1422,6 +1718,39 @@ function setupReminderTabs() {
   }
 
   Logger.log('Reminder tabs ready in the roster spreadsheet.');
+}
+
+// One-time upgrade for targeted alerts: adds an "Owner" column to
+// Clinic Schedule and an "Email" column to Coaches (skips any that
+// already exist). Fill them in afterward — the owner name must match
+// the Coaches tab spelling.
+function setupOwnerColumns() {
+  const ss = SpreadsheetApp.openById(ROSTER_SHEET_ID);
+
+  const sched = ss.getSheetByName('Clinic Schedule');
+  if (sched) {
+    const headers = sched.getRange(1, 1, 1, sched.getLastColumn()).getValues()[0];
+    const hasOwner = headers.some(h => (h || '').toString().toLowerCase().indexOf('owner') !== -1);
+    if (!hasOwner) {
+      const col = sched.getLastColumn() + 1;
+      sched.getRange(1, col).setValue('Owner (coach name)')
+        .setFontWeight('bold').setBackground('#021f3d').setFontColor('white');
+      sched.setColumnWidth(col, 180);
+    }
+  }
+
+  const coaches = ss.getSheetByName('Coaches');
+  if (coaches) {
+    const headers = coaches.getRange(1, 1, 1, coaches.getLastColumn()).getValues()[0];
+    const hasEmail = headers.some(h => (h || '').toString().toLowerCase().indexOf('email') !== -1);
+    if (!hasEmail) {
+      const col = coaches.getLastColumn() + 1;
+      coaches.getRange(1, col).setValue('Email').setFontWeight('bold');
+      coaches.setColumnWidth(col, 240);
+    }
+  }
+
+  Logger.log('Owner/Email columns ready — fill them in on the roster spreadsheet.');
 }
 
 function setupMissingRollTriggers() {
@@ -1471,13 +1800,12 @@ function menuCheckMissingNow() {
     ui.alert('✅ All caught up — no missing rolls.');
     return;
   }
-  const recipients = getAlertRecipients();
-  if (recipients.length === 0) {
-    ui.alert('Found ' + missing.length + ' missing roll(s), but no recipients are set in the "Alert Recipients" tab.');
-    return;
+  const sent = sendTargetedAlerts(missing, false);
+  if (sent === 0) {
+    ui.alert('Found ' + missing.length + ' missing roll(s), but no recipients could be resolved. Check the "Alert Recipients" tab and the Email column on the Coaches tab.');
+  } else {
+    ui.alert('Sent ' + sent + ' alert email(s) covering ' + missing.length + ' missing roll(s) — each person only gets their own clinics.');
   }
-  sendMissingRollEmail(recipients, missing, false);
-  ui.alert('Sent an alert for ' + missing.length + ' missing roll(s) to: ' + recipients.join(', '));
 }
 
 function menuShowMissing() {
