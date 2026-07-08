@@ -134,7 +134,7 @@ function doGet(e) {
       .setMimeType(ContentService.MimeType.JSON);
   }
   return ContentService
-    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'families-autofill-v1' }))
+    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'charged-tracking-v1' }))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -760,19 +760,41 @@ function generateMonthlyBilling(monthOverride, yearOverride) {
 
     const tabName = clinic + ' - Billing - ' + monthName;
     let sheet = billingSS.getSheetByName(tabName);
-    if (sheet) billingSS.deleteSheet(sheet);
+
+    // Preserve Charged?/Charged On from the existing tab so regenerating
+    // the report never loses the shop manager's progress
+    const prevCharged = {};
+    if (sheet) {
+      const prevData = sheet.getDataRange().getValues();
+      if (prevData.length > 1) {
+        const prevHeaders = prevData[0];
+        const cCol = prevHeaders.indexOf('Charged?');
+        const dCol = prevHeaders.indexOf('Charged On');
+        if (cCol !== -1) {
+          for (let i = 1; i < prevData.length; i++) {
+            const pname = (prevData[i][0] || '').toString().trim().toLowerCase();
+            if (pname && prevData[i][cCol] === true) {
+              prevCharged[pname] = dCol !== -1 ? prevData[i][dCol] : '';
+            }
+          }
+        }
+      }
+      billingSS.deleteSheet(sheet);
+    }
     sheet = billingSS.insertSheet(tabName);
 
     // Header
-    const headers = ['Player Name', 'Status', 'Sessions', 'Total', 'Sibling Discount', 'Final Charge', 'Note'];
+    const headers = ['Player Name', 'Status', 'Sessions', 'Total', 'Sibling Discount', 'Final Charge', 'Charged?', 'Charged On', 'Note'];
     sheet.appendRow(headers);
     const headerRange = sheet.getRange(1, 1, 1, headers.length);
     headerRange.setFontWeight('bold');
     headerRange.setBackground('#2e7d32');
     headerRange.setFontColor('white');
 
-    // Data rows
+    // Data rows (restoring any Charged? ticks captured above)
     for (const row of billingRows) {
+      const key = row.name.toLowerCase();
+      const wasCharged = Object.prototype.hasOwnProperty.call(prevCharged, key);
       sheet.appendRow([
         row.name,
         row.status,
@@ -780,13 +802,17 @@ function generateMonthlyBilling(monthOverride, yearOverride) {
         row.total,
         row.discount > 0 ? row.discount : '',
         row.finalTotal,
+        wasCharged,
+        wasCharged ? (prevCharged[key] || new Date()) : '',
         row.siblingNote
       ]);
     }
 
-    // Format currency and highlight sibling families
+    // Checkboxes, currency/date formats, and sibling highlights
     if (billingRows.length > 0) {
+      sheet.getRange(2, 7, billingRows.length, 1).insertCheckboxes();
       sheet.getRange(2, 4, billingRows.length, 3).setNumberFormat('$#,##0.00');
+      sheet.getRange(2, 8, billingRows.length, 1).setNumberFormat('M/d/yyyy');
       for (let i = 0; i < billingRows.length; i++) {
         if (billingRows[i].isSibling) {
           sheet.getRange(i + 2, 1, 1, headers.length).setBackground('#fff9c4');
@@ -801,7 +827,9 @@ function generateMonthlyBilling(monthOverride, yearOverride) {
     sheet.setColumnWidth(4, 100);
     sheet.setColumnWidth(5, 130);
     sheet.setColumnWidth(6, 110);
-    sheet.setColumnWidth(7, 220);
+    sheet.setColumnWidth(7, 90);
+    sheet.setColumnWidth(8, 110);
+    sheet.setColumnWidth(9, 220);
     sheet.setFrozenRows(1);
 
     // Summary at bottom
@@ -843,6 +871,182 @@ function generateLastMonthBilling() {
     year--;
   }
   generateMonthlyBilling(month, year);
+}
+
+// ============================================================
+// UNCHARGED BILLING TRACKER
+// ============================================================
+// Each billing tab has a per-player "Charged?" checkbox the shop manager
+// ticks after charging that family in the system; "Charged On" stamps
+// itself automatically. A weekly digest (Mon ~7am) emails everyone on the
+// self-installing "Billing Reminders" tab (in the ROSTER spreadsheet)
+// a list of players still uncharged. Items older than 14 days past the
+// end of their billing month get a warning flag.
+//
+// ONE-TIME SETUP: run setupBillingReminders() once from the editor, then
+// add your shop manager's email to the "Billing Reminders" tab.
+// ============================================================
+
+const BILLING_AGING_DAYS = 14;
+
+function getBillingReminderRecipients() {
+  const sheet = SpreadsheetApp.openById(ROSTER_SHEET_ID).getSheetByName('Billing Reminders');
+  if (!sheet) return [];
+  const data = sheet.getDataRange().getValues();
+  const emails = [];
+  for (let i = 1; i < data.length; i++) {
+    const email = (data[i][1] || '').toString().trim();
+    if (email && email.indexOf('@') !== -1) emails.push(email);
+  }
+  return emails;
+}
+
+// Installable onEdit trigger on the BILLING spreadsheet: when a Charged?
+// box is ticked, stamp today's date in Charged On (clear it when unticked).
+function onBillingEdit(e) {
+  try {
+    const sheet = e.range.getSheet();
+    if (sheet.getName().indexOf(' - Billing - ') === -1) return;
+    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    const chargedCol = headers.indexOf('Charged?') + 1;
+    const chargedOnCol = headers.indexOf('Charged On') + 1;
+    if (!chargedCol || !chargedOnCol) return;
+    if (e.range.getColumn() !== chargedCol) return;
+
+    const startRow = e.range.getRow();
+    for (let r = 0; r < e.range.getNumRows(); r++) {
+      const row = startRow + r;
+      if (row === 1) continue;
+      const checked = sheet.getRange(row, chargedCol).getValue() === true;
+      const cell = sheet.getRange(row, chargedOnCol);
+      cell.setValue(checked ? new Date() : '');
+      cell.setNumberFormat('M/d/yyyy');
+    }
+  } catch (err) {
+    // Never let the stamper break someone's edit
+  }
+}
+
+// Scans every "<Clinic> - Billing - <Month Year>" tab for players whose
+// Charged? box is still unticked and emails the digest. Sends nothing
+// when everything is charged. Returns the number of uncharged items.
+function sendUnchargedBillingDigest() {
+  const recipients = getBillingReminderRecipients();
+  if (recipients.length === 0) {
+    Logger.log('No recipients on the "Billing Reminders" tab - digest not sent.');
+    return 0;
+  }
+
+  const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December'];
+  const ss = SpreadsheetApp.openById(BILLING_SHEET_ID);
+  const groups = {}; // "Clinic (Month Year)" -> [{ player, amount, aged }]
+  let count = 0;
+
+  for (const sheet of ss.getSheets()) {
+    const name = sheet.getName();
+    const idx = name.indexOf(' - Billing - ');
+    if (idx === -1) continue;
+    const clinic = name.substring(0, idx);
+    const monthLabel = name.substring(idx + ' - Billing - '.length);
+
+    const data = sheet.getDataRange().getValues();
+    if (data.length < 2) continue;
+    const headers = data[0];
+    const chargedCol = headers.indexOf('Charged?');
+    const finalCol = headers.indexOf('Final Charge');
+    if (chargedCol === -1 || finalCol === -1) continue; // old-format tab
+
+    // Aged = more than BILLING_AGING_DAYS past the end of the billing month
+    let aged = false;
+    const parts = monthLabel.split(' ');
+    const mIdx = monthNames.indexOf(parts[0]);
+    const year = parseInt(parts[1]);
+    if (mIdx !== -1 && year) {
+      const dueSince = new Date(year, mIdx + 1, 1);
+      aged = (Date.now() - dueSince.getTime()) / 86400000 >= BILLING_AGING_DAYS;
+    }
+
+    for (let i = 1; i < data.length; i++) {
+      // Player rows have a numeric Sessions value; summary rows don't
+      if (typeof data[i][2] !== 'number') continue;
+      const player = (data[i][0] || '').toString().trim();
+      if (!player) continue;
+      if (data[i][chargedCol] === true) continue;
+
+      const label = clinic + ' (' + monthLabel + ')';
+      if (!groups[label]) groups[label] = [];
+      groups[label].push({
+        player: player,
+        amount: Number(data[i][finalCol]) || 0,
+        aged: aged
+      });
+      count++;
+    }
+  }
+
+  if (count === 0) return 0; // all charged - stay quiet
+
+  // Plain-ASCII subject; HTML entities in the body (mail-safe)
+  const subject = 'Uncharged Billing Alert - ' + count + ' player' + (count !== 1 ? 's' : '') + ' outstanding';
+  let html = '<div style="font-family:Arial,sans-serif;color:#333;">';
+  html += '<h2 style="color:#c62828;margin-bottom:4px;">&#9888;&#65039; Uncharged Billing</h2>';
+  html += '<p>These players have <strong>not been marked as charged</strong> on the billing sheet:</p>';
+  for (const label in groups) {
+    html += '<p style="margin-bottom:2px;"><strong>' + label + '</strong></p><ul style="margin-top:2px;">';
+    for (const item of groups[label]) {
+      html += '<li>' + item.player + ' &mdash; $' + item.amount.toFixed(2) +
+        (item.aged ? ' &#9888;&#65039; ' + BILLING_AGING_DAYS + '+ days' : '') + '</li>';
+    }
+    html += '</ul>';
+  }
+  html += '<p>Tick the "Charged?" box on the billing sheet as each one is entered.</p></div>';
+
+  MailApp.sendEmail({ to: recipients.join(','), subject: subject, htmlBody: html });
+  return count;
+}
+
+// One-time setup: creates the "Billing Reminders" recipients tab, the
+// weekly digest trigger (Mon ~7am), and the Charged On date-stamper.
+function setupBillingReminders() {
+  const ss = SpreadsheetApp.openById(ROSTER_SHEET_ID);
+  if (!ss.getSheetByName('Billing Reminders')) {
+    const s = ss.insertSheet('Billing Reminders');
+    s.appendRow(['Name', 'Email']);
+    s.appendRow(['J.C.', 'jcdfreeman@gmail.com']);
+    s.getRange(1, 1, 1, 2).setFontWeight('bold').setBackground('#021f3d').setFontColor('white');
+    s.setColumnWidth(1, 150);
+    s.setColumnWidth(2, 260);
+    s.setFrozenRows(1);
+  }
+
+  // Replace any existing triggers to avoid duplicates
+  for (const t of ScriptApp.getProjectTriggers()) {
+    const fn = t.getHandlerFunction();
+    if (fn === 'sendUnchargedBillingDigest' || fn === 'onBillingEdit') {
+      ScriptApp.deleteTrigger(t);
+    }
+  }
+  ScriptApp.newTrigger('sendUnchargedBillingDigest')
+    .timeBased().everyWeeks(1).onWeekDay(ScriptApp.WeekDay.MONDAY).atHour(7).create();
+  ScriptApp.newTrigger('onBillingEdit')
+    .forSpreadsheet(BILLING_SHEET_ID).onEdit().create();
+
+  Logger.log('Billing reminders ready: weekly Monday digest + Charged On date-stamper. Add your shop manager to the "Billing Reminders" tab.');
+}
+
+// Menu handler: send the digest on demand.
+function menuSendUnchargedDigest() {
+  const ui = SpreadsheetApp.getUi();
+  const recipients = getBillingReminderRecipients();
+  if (recipients.length === 0) {
+    ui.alert('No recipients yet. Run setupBillingReminders() once in the editor, then add emails to the "Billing Reminders" tab.');
+    return;
+  }
+  const count = sendUnchargedBillingDigest();
+  ui.alert(count === 0
+    ? 'All charged - nothing outstanding.'
+    : 'Digest sent for ' + count + ' uncharged player' + (count !== 1 ? 's' : '') + ' to: ' + recipients.join(', '));
 }
 
 // ============================================================
@@ -1320,6 +1524,7 @@ function onOpen() {
     .addItem('Generate Last Month — A/S Summary Only', 'menuLastMonthAS')
     .addSeparator()
     .addItem('Update Families List', 'menuUpdateFamilies')
+    .addItem('Send Uncharged Billing Digest Now', 'menuSendUnchargedDigest')
     .addToUi();
 
   ui.createMenu('Roll Reminders')
