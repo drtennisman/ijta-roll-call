@@ -40,7 +40,13 @@ function getMonthTabName(dateStr) {
 }
 
 function doPost(e) {
+  const lock = LockService.getScriptLock();
   try {
+    // Queue simultaneous submissions (e.g. two coaches hitting Submit at
+    // the same moment) so each roll's rows land as one contiguous block
+    // instead of interleaving. Waits up to 30s for the other to finish.
+    lock.waitLock(30000);
+
     const data = JSON.parse(e.postData.contents);
     const { date, clinic, clinicTab, coaches, players, newCoaches } = data;
 
@@ -121,6 +127,8 @@ function doPost(e) {
     return ContentService
       .createTextOutput(JSON.stringify({ success: false, error: error.toString() }))
       .setMimeType(ContentService.MimeType.JSON);
+  } finally {
+    try { lock.releaseLock(); } catch (ignored) {}
   }
 }
 
@@ -134,7 +142,7 @@ function doGet(e) {
       .setMimeType(ContentService.MimeType.JSON);
   }
   return ContentService
-    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'charged-tracking-v1' }))
+    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'submit-lock-v1' }))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
