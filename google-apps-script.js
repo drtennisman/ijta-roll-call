@@ -78,11 +78,35 @@ function doPost(e) {
       sheet.setFrozenRows(1);
     }
 
+    // What's already logged for this clinic+date? Guards against double
+    // submissions ("Retry" after a timeout whose first attempt actually
+    // landed) and re-takes writing duplicate player rows.
+    const existingPlayers = {};
+    let sessionHasRows = false;
+    {
+      const existing = sheet.getDataRange().getValues();
+      const target = parseDate(date);
+      for (let i = 1; i < existing.length; i++) {
+        const rd = parseDate(existing[i][0]);
+        if (!rd || !target) continue;
+        if (rd.getFullYear() !== target.getFullYear() ||
+            rd.getMonth() !== target.getMonth() ||
+            rd.getDate() !== target.getDate()) continue;
+        if ((existing[i][1] || '').toString().trim() !== clinic) continue;
+        sessionHasRows = true;
+        const pn = (existing[i][3] || '').toString().trim().toLowerCase();
+        if (pn) existingPlayers[pn] = true;
+      }
+    }
+
     // Clinic cancelled (rain-out / holiday) — record a single marker row.
     // This clears the missing-roll flag for the day; reports skip these rows.
     if (data.cancelled) {
       const reason = (data.cancelReason || 'Other').toString();
-      sheet.appendRow([date, clinic, '', 'Clinic Cancelled (' + reason + ')', '']);
+      // Don't stack a second marker (or contradict rows already logged)
+      if (!sessionHasRows) {
+        sheet.appendRow([date, clinic, '', 'Clinic Cancelled (' + reason + ')', '']);
+      }
       return ContentService
         .createTextOutput(JSON.stringify({ success: true, cancelled: true }))
         .setMimeType(ContentService.MimeType.JSON);
@@ -94,22 +118,37 @@ function doPost(e) {
     ).join(', ');
 
     // Players now come as objects: { name: "Last, First", status: "M"|"G" }
-    // Add one row per player
-    // Coaches only appear on the first row of each session
+    // Add one row per player — but only players NOT already logged for
+    // this clinic+date (duplicates from retries/re-takes are skipped).
+    // Coaches only appear on the first row of each written batch.
+    let recorded = 0;
+    let duplicatesSkipped = 0;
     if (data.noAttendees) {
       // No one showed up — record a single row noting that
-      sheet.appendRow([date, clinic, coachesStr, 'No Attendees', '']);
+      // (skip if this session already has rows — that would contradict them)
+      if (!sessionHasRows) {
+        sheet.appendRow([date, clinic, coachesStr, 'No Attendees', '']);
+      }
     } else {
-      for (let i = 0; i < players.length; i++) {
-        const player = typeof players[i] === 'string' ? { name: players[i], status: 'M' } : players[i];
-        const row = [
+      const newPlayers = [];
+      for (const p of players) {
+        const player = typeof p === 'string' ? { name: p, status: 'M' } : p;
+        const key = (player.name || '').trim().toLowerCase();
+        if (!key) continue;
+        if (existingPlayers[key]) { duplicatesSkipped++; continue; }
+        existingPlayers[key] = true;  // also catches dupes within one submission
+        newPlayers.push(player);
+      }
+      for (let i = 0; i < newPlayers.length; i++) {
+        const player = newPlayers[i];
+        sheet.appendRow([
           date,
           clinic,
           i === 0 ? coachesStr : '',  // Coaches only on first row
           player.name,
           player.status || 'M'
-        ];
-        sheet.appendRow(row);
+        ]);
+        recorded++;
       }
     }
 
@@ -120,7 +159,7 @@ function doPost(e) {
     const coachesAdded = addNewCoachesToRoster(newCoaches || []);
 
     return ContentService
-      .createTextOutput(JSON.stringify({ success: true, playersRecorded: players.length, rosterAdded: added, coachesAdded: coachesAdded }))
+      .createTextOutput(JSON.stringify({ success: true, playersRecorded: recorded, duplicatesSkipped: duplicatesSkipped, rosterAdded: added, coachesAdded: coachesAdded }))
       .setMimeType(ContentService.MimeType.JSON);
 
   } catch (error) {
@@ -142,7 +181,7 @@ function doGet(e) {
       .setMimeType(ContentService.MimeType.JSON);
   }
   return ContentService
-    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'submit-lock-v1' }))
+    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'dedupe-diary-v1' }))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -404,7 +443,7 @@ function getAttendanceWithCoachesForMonth(billingMonth, billingYear) {
   const legacySheet = ss.getSheetByName('Attendance');
   if (legacySheet) sheetsToRead.push(legacySheet);
 
-  if (sheetsToRead.length === 0) return { rows: [], sessionCoaches: {} };
+  if (sheetsToRead.length === 0) return { rows: [], sessionCoaches: {}, sessionMarkers: {} };
 
   // Clinic session durations — used as the default hours for bare coach
   // names (entries without an explicit "(Xh)" tag, e.g. legacy data).
@@ -412,6 +451,7 @@ function getAttendanceWithCoachesForMonth(billingMonth, billingYear) {
 
   const rows = [];
   const sessionCoaches = {};
+  const sessionMarkers = {}; // "dateStr|||clinic" -> 'No Attendees' | 'Cancelled (Reason)'
 
   for (const sheet of sheetsToRead) {
     const data = sheet.getDataRange().getValues();
@@ -427,9 +467,17 @@ function getAttendanceWithCoachesForMonth(billingMonth, billingYear) {
       const status = data[i][4] || 'M';
 
       if (!playerName || !clinic) continue;
-      if (String(playerName).trim() === 'No Attendees') continue;
-      if (String(playerName).trim().indexOf('Clinic Cancelled') === 0) continue;
       if (rowDate.getMonth() + 1 !== billingMonth || rowDate.getFullYear() !== billingYear) continue;
+
+      // Marker rows (session with nobody / cancelled): keep for the A/S
+      // session diary, but exclude from revenue and staffing entirely
+      const pn = String(playerName).trim();
+      if (pn === 'No Attendees' || pn.indexOf('Clinic Cancelled') === 0) {
+        const mDateStr = (rowDate.getMonth() + 1) + '/' + rowDate.getDate() + '/' + rowDate.getFullYear();
+        sessionMarkers[mDateStr + '|||' + String(clinic).trim()] =
+          pn === 'No Attendees' ? 'No Attendees' : pn.replace('Clinic Cancelled', 'Cancelled');
+        continue;
+      }
 
       rows.push({ date: rowDate, clinic: clinic, playerName: playerName, status: status });
 
@@ -453,7 +501,7 @@ function getAttendanceWithCoachesForMonth(billingMonth, billingYear) {
     }
   }
 
-  return { rows, sessionCoaches };
+  return { rows, sessionCoaches, sessionMarkers };
 }
 
 // ============================================================
@@ -744,7 +792,15 @@ function generateMonthlyBilling(monthOverride, yearOverride) {
   // Group sessions by clinic -> player
   const clinicData = {}; // { clinic: { playerKey: { name, status, sessions } } }
 
+  // A clinic meets at most once per day, so each kid counts at most one
+  // session per clinic per day — neutralizes any duplicate rows.
+  const seenSession = {};
   for (const row of attendanceRows) {
+    const dayKey = row.clinic + '|||' + row.playerName.toString().trim().toLowerCase() + '|||' +
+      (row.date.getMonth() + 1) + '/' + row.date.getDate() + '/' + row.date.getFullYear();
+    if (seenSession[dayKey]) continue;
+    seenSession[dayKey] = true;
+
     if (!clinicData[row.clinic]) clinicData[row.clinic] = {};
     const cd = clinicData[row.clinic];
     if (!cd[row.playerName]) {
@@ -1092,7 +1148,10 @@ function generateAttendanceSummary(monthOverride, yearOverride) {
       clinicData[row.clinic].dates[dateStr] = [];
       clinicData[row.clinic].dateObjects[dateStr] = row.date;
     }
-    clinicData[row.clinic].dates[dateStr].push(row.playerName);
+    // Skip duplicate rows for the same kid on the same day
+    if (clinicData[row.clinic].dates[dateStr].indexOf(row.playerName) === -1) {
+      clinicData[row.clinic].dates[dateStr].push(row.playerName);
+    }
     clinicData[row.clinic].playerStatus[row.playerName] = row.status;
   }
 
@@ -1219,11 +1278,11 @@ function generateAttendanceAndStaffingSummary(monthOverride, yearOverride) {
   const monthName = new Date(billingYear, billingMonth - 1, 1)
     .toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
 
-  // Get attendance data WITH coaches
-  const { rows: attendanceRows, sessionCoaches } =
+  // Get attendance data WITH coaches and no-attendee/cancelled markers
+  const { rows: attendanceRows, sessionCoaches, sessionMarkers } =
     getAttendanceWithCoachesForMonth(billingMonth, billingYear);
 
-  if (attendanceRows.length === 0) {
+  if (attendanceRows.length === 0 && Object.keys(sessionMarkers).length === 0) {
     Logger.log('No attendance data found for A/S summary: ' + monthName);
     return;
   }
@@ -1244,7 +1303,8 @@ function generateAttendanceAndStaffingSummary(monthOverride, yearOverride) {
         dates: {},
         dateObjects: {},
         playerStatus: {},
-        coachesByDate: {}
+        coachesByDate: {},
+        markersByDate: {}
       };
     }
     const cd = clinicData[row.clinic];
@@ -1253,13 +1313,35 @@ function generateAttendanceAndStaffingSummary(monthOverride, yearOverride) {
       cd.dates[dateStr] = [];
       cd.dateObjects[dateStr] = row.date;
     }
-    cd.dates[dateStr].push(row.playerName);
+    // Skip duplicate rows for the same kid on the same day
+    if (cd.dates[dateStr].indexOf(row.playerName) === -1) {
+      cd.dates[dateStr].push(row.playerName);
+    }
     cd.playerStatus[row.playerName] = row.status;
 
     // Map coaches to this clinic+date
     const sessionKey = dateStr + '|||' + row.clinic;
     if (sessionCoaches[sessionKey]) {
       cd.coachesByDate[dateStr] = sessionCoaches[sessionKey];
+    }
+  }
+
+  // Fold in no-attendee / cancelled dates so they appear in the session
+  // diary (zero players, zero dollars — informational only)
+  for (const key in sessionMarkers) {
+    const sep = key.indexOf('|||');
+    const dateStr = key.substring(0, sep);
+    const clinic = key.substring(sep + 3);
+    if (!clinicData[clinic]) {
+      clinicData[clinic] = { dates: {}, dateObjects: {}, playerStatus: {}, coachesByDate: {}, markersByDate: {} };
+    }
+    const cd = clinicData[clinic];
+    if (!cd.markersByDate) cd.markersByDate = {};
+    cd.markersByDate[dateStr] = sessionMarkers[key];
+    if (!cd.dates[dateStr]) {
+      cd.dates[dateStr] = [];
+      const p = dateStr.split('/');
+      cd.dateObjects[dateStr] = new Date(parseInt(p[2]), parseInt(p[0]) - 1, parseInt(p[1]));
     }
   }
 
@@ -1302,9 +1384,12 @@ function generateAttendanceAndStaffingSummary(monthOverride, yearOverride) {
     const coachTotalHours = {};
     const coachSessionDates = {};
 
+    let heldCount = 0, noAttCount = 0, cancelledCount = 0;
+
     for (const dateStr of sortedDates) {
       const players = cd.dates[dateStr].sort();
       totalCheckIns += players.length;
+      const marker = (cd.markersByDate && cd.markersByDate[dateStr]) || null;
 
       const dateCoaches = cd.coachesByDate[dateStr] || [];
       // Display coach names with hours only if not a full session
@@ -1314,8 +1399,17 @@ function generateAttendanceAndStaffingSummary(monthOverride, yearOverride) {
 
       sheet.getRange(currentRow, 1).setValue(dateStr);
       sheet.getRange(currentRow, 2).setValue(players.length);
-      sheet.getRange(currentRow, 3).setValue(coachesDisplay);
-      sheet.getRange(currentRow, 4).setValue(players.join('; '));
+      if (players.length === 0 && marker) {
+        // Diary row: session with nobody, or a cancellation
+        sheet.getRange(currentRow, 3).setValue(marker);
+        sheet.getRange(currentRow, 1, 1, 4).setFontColor('#999999').setFontStyle('italic');
+        if (marker.indexOf('Cancelled') === 0) cancelledCount++;
+        else noAttCount++;
+      } else {
+        sheet.getRange(currentRow, 3).setValue(coachesDisplay);
+        sheet.getRange(currentRow, 4).setValue(players.join('; '));
+        heldCount++;
+      }
 
       // Tally actual hours and track dates per coach
       for (const coach of dateCoaches) {
@@ -1329,7 +1423,10 @@ function generateAttendanceAndStaffingSummary(monthOverride, yearOverride) {
     // Attendance summary row
     const uniquePlayers = [...new Set(Object.keys(cd.dates).flatMap(d => cd.dates[d]))];
     currentRow++;
-    sheet.getRange(currentRow, 1).setValue('Total Sessions: ' + sortedDates.length);
+    let sessionsLabel = 'Total Sessions: ' + heldCount + ' held';
+    if (noAttCount > 0) sessionsLabel += ', ' + noAttCount + ' no attendees';
+    if (cancelledCount > 0) sessionsLabel += ', ' + cancelledCount + ' cancelled';
+    sheet.getRange(currentRow, 1).setValue(sessionsLabel);
     sheet.getRange(currentRow, 1).setFontWeight('bold');
     sheet.getRange(currentRow, 2).setValue('Check-ins: ' + totalCheckIns);
     sheet.getRange(currentRow, 3).setValue('Unique Players: ' + uniquePlayers.length);
