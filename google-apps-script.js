@@ -181,7 +181,7 @@ function doGet(e) {
       .setMimeType(ContentService.MimeType.JSON);
   }
   return ContentService
-    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'dedupe-diary-v1' }))
+    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'family-rows-v1' }))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -508,20 +508,23 @@ function getAttendanceWithCoachesForMonth(billingMonth, billingYear) {
 // SIBLING DISCOUNT (10% off every sibling except the highest-priced)
 // ============================================================
 // Siblings are matched by last name WITHIN each clinic. The self-filling
-// "Families" tab in the roster spreadsheet manages the exceptions:
+// "Families" tab in the roster spreadsheet is the source of truth:
 //   Players (Last, First; Last, First) | Siblings? (Yes/No) | Clinic (auto)
 // It auto-populates with every detected same-last-name group (Siblings? =
-// Yes). Flip a row to "No" to un-link an accidental match (two unrelated
-// families sharing a last name), or add a row by hand for real siblings
-// with DIFFERENT last names. The highest-priced sibling pays full; the
-// rest get 10% off.
+// Yes). A "Yes" row IS the family — exactly its members; kids on a Yes row
+// are exempt from last-name auto-matching, so you can trim an unrelated
+// same-name kid out of a family row and the edit sticks (the auto-fill
+// never re-adds a grouping that touches a kid already on the tab).
+// Flip a row to "No" to un-link unlisted kids who aren't related, or add
+// a row by hand for real siblings with DIFFERENT last names.
+// The highest-priced sibling pays full; the rest get 10% off.
 // ============================================================
 
 // Clinic roster tab names in the ROSTER spreadsheet (match the app's CLINICS)
 const CLINIC_ROSTER_TABS = ['Red Ball', 'Orange Ball', 'Green Ball', 'Middle School', 'High School', 'Bruno'];
 
 function getSiblingOverrides() {
-  const result = { notPairs: {}, families: [] };
+  const result = { notPairs: {}, families: [], familyMembers: {} };
   const sheet = SpreadsheetApp.openById(ROSTER_SHEET_ID).getSheetByName('Families');
   if (!sheet) return result;
 
@@ -543,8 +546,11 @@ function getSiblingOverrides() {
         }
       }
     } else {
-      // Confirmed siblings (covers cross-last-name families; harmless if same-name)
+      // A "Yes" row IS the family — exactly these members. Kids on a Yes
+      // row are claimed: last-name auto-matching leaves them alone, so an
+      // unrelated same-name kid (e.g. Lucy Davidson) can't get pulled in.
       result.families.push(names);
+      names.forEach(n => { result.familyMembers[n] = true; });
     }
   }
   return result;
@@ -562,10 +568,12 @@ function applySiblingDiscounts(rows, overrides) {
   const lowerNames = rows.map(r => r.name.toLowerCase());
   const pairKey = (a, b) => [a, b].sort().join('|||');
 
-  // Same last name = same family, unless marked "Not Siblings"
+  // Same last name = same family — but only between kids NOT claimed by
+  // an explicit "Yes" family row, and not vetoed by a "No" row
   for (let i = 0; i < n; i++) {
     for (let j = i + 1; j < n; j++) {
       if (rows[i].lastName.toLowerCase() !== rows[j].lastName.toLowerCase()) continue;
+      if (overrides.familyMembers[lowerNames[i]] || overrides.familyMembers[lowerNames[j]]) continue;
       if (overrides.notPairs[pairKey(lowerNames[i], lowerNames[j])]) continue;
       union(i, j);
     }
@@ -648,13 +656,19 @@ function updateFamiliesList() {
     sheet.setFrozenRows(1);
   }
 
-  // Existing entries, keyed by the sorted lowercase set of names
+  // Existing entries, keyed by the sorted lowercase set of names.
+  // Also track every kid mentioned anywhere on the tab — groups touching
+  // them are never re-added, so human edits stay as the human left them.
   const data = sheet.getDataRange().getValues();
   const existing = {};
+  const mentioned = {};
   for (let i = 1; i < data.length; i++) {
     const names = (data[i][0] || '').toString().split(';')
       .map(s => s.trim().toLowerCase()).filter(Boolean).sort();
-    if (names.length) existing[names.join('|||')] = true;
+    if (names.length) {
+      existing[names.join('|||')] = true;
+      names.forEach(n => { mentioned[n] = true; });
+    }
   }
 
   // Detect candidate families per clinic roster (same last name, 2+ kids)
@@ -682,11 +696,14 @@ function updateFamiliesList() {
     }
   }
 
-  // Append only genuinely new families
+  // Append only genuinely new families — and never a grouping that
+  // includes a kid already listed on the tab (e.g. after J.C. trims an
+  // unrelated same-name kid out of a family, that edit is permanent)
   let added = 0;
   for (const key in candidates) {
     if (existing[key]) continue;
     const c = candidates[key];
+    if (c.players.some(p => mentioned[p.toLowerCase()])) continue;
     sheet.appendRow([c.players.join('; '), 'Yes', Object.keys(c.clinics).join(', ')]);
     added++;
   }
