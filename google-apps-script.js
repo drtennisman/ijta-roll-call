@@ -181,7 +181,7 @@ function doGet(e) {
       .setMimeType(ContentService.MimeType.JSON);
   }
   return ContentService
-    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'master-summary-v1' }))
+    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'master-summary-v2' }))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -1699,7 +1699,15 @@ function generateMasterASSummary(monthOverride, yearOverride) {
     gNoAtt += noAtt; gCancelled += cancelled;
   }
 
-  clinicRows.sort((a, b) => a.clinic.localeCompare(b.clinic));
+  // Program progression order (youngest to oldest), not alphabetical.
+  // Anything not listed falls to the end, alphabetically.
+  const CLINIC_ORDER = ['Red Ball', 'Orange Ball', 'Green Ball', 'MS Yellow Ball', 'HS Yellow Ball', 'Bruno'];
+  const orderOf = (name) => {
+    const i = CLINIC_ORDER.indexOf(name);
+    return i === -1 ? CLINIC_ORDER.length : i;
+  };
+  clinicRows.sort((a, b) =>
+    orderOf(a.clinic) - orderOf(b.clinic) || a.clinic.localeCompare(b.clinic));
 
   // ---- Write the tab ----
   const ss = SpreadsheetApp.openById(BILLING_SHEET_ID);
