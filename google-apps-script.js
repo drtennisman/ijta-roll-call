@@ -181,7 +181,7 @@ function doGet(e) {
       .setMimeType(ContentService.MimeType.JSON);
   }
   return ContentService
-    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'family-rows-v1' }))
+    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'master-summary-v1' }))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -1585,6 +1585,249 @@ function generateAttendanceAndStaffingSummary(monthOverride, yearOverride) {
   }
 }
 
+// ============================================================
+// MASTER A/S SUMMARY (all clinics on one tab)
+// ============================================================
+// One consolidated page for the controller: a row per clinic showing
+// revenue, staffing cost, and net profit, plus a grand total. Uses the
+// exact same math as the per-clinic A/S tabs (sibling discounts applied,
+// duplicate rows collapsed, cancelled/no-attendee dates excluded from
+// dollars). Also lists total hours and cost per coach across all clinics.
+// ============================================================
+
+function generateMasterASSummary(monthOverride, yearOverride) {
+  const now = new Date();
+  const billingMonth = monthOverride || now.getMonth() + 1;
+  const billingYear = yearOverride || now.getFullYear();
+
+  const monthName = new Date(billingYear, billingMonth - 1, 1)
+    .toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+
+  const { rows: attendanceRows, sessionCoaches, sessionMarkers } =
+    getAttendanceWithCoachesForMonth(billingMonth, billingYear);
+
+  if (attendanceRows.length === 0 && Object.keys(sessionMarkers).length === 0) {
+    Logger.log('No data for master A/S summary: ' + monthName);
+    return null;
+  }
+
+  const coachRates = getCoachRates();
+  const siblingOverrides = getSiblingOverrides();
+
+  // Gather per-clinic attendance, coaches, and markers
+  const clinicData = {};
+  const ensure = (clinic) => {
+    if (!clinicData[clinic]) {
+      clinicData[clinic] = { dates: {}, playerStatus: {}, coachesByDate: {}, markers: {} };
+    }
+    return clinicData[clinic];
+  };
+
+  for (const row of attendanceRows) {
+    const dateStr = (row.date.getMonth() + 1) + '/' + row.date.getDate() + '/' + row.date.getFullYear();
+    const cd = ensure(row.clinic);
+    if (!cd.dates[dateStr]) cd.dates[dateStr] = [];
+    if (cd.dates[dateStr].indexOf(row.playerName) === -1) cd.dates[dateStr].push(row.playerName);
+    cd.playerStatus[row.playerName] = row.status;
+    const sessionKey = dateStr + '|||' + row.clinic;
+    if (sessionCoaches[sessionKey]) cd.coachesByDate[dateStr] = sessionCoaches[sessionKey];
+  }
+  for (const key in sessionMarkers) {
+    const sep = key.indexOf('|||');
+    ensure(key.substring(sep + 3)).markers[key.substring(0, sep)] = sessionMarkers[key];
+  }
+
+  // Roll up each clinic
+  const clinicRows = [];
+  const coachTotals = {}; // name -> { hours, cost }
+  let gGross = 0, gDiscount = 0, gNet = 0, gStaffing = 0,
+      gSessions = 0, gCheckIns = 0, gNoAtt = 0, gCancelled = 0;
+
+  for (const clinic in clinicData) {
+    const cd = clinicData[clinic];
+
+    let held = 0, checkIns = 0;
+    for (const dateStr in cd.dates) {
+      if (cd.dates[dateStr].length > 0) { held++; checkIns += cd.dates[dateStr].length; }
+    }
+    let noAtt = 0, cancelled = 0;
+    for (const dateStr in cd.markers) {
+      if (String(cd.markers[dateStr]).indexOf('Cancelled') === 0) cancelled++;
+      else noAtt++;
+    }
+
+    // Revenue (sibling discounts applied)
+    const playerSessions = {};
+    for (const dateStr in cd.dates) {
+      for (const p of cd.dates[dateStr]) playerSessions[p] = (playerSessions[p] || 0) + 1;
+    }
+    const billing = buildClinicBillingRows(clinic,
+      Object.keys(playerSessions).map(p => ({
+        name: p, status: cd.playerStatus[p] || 'M', sessions: playerSessions[p]
+      })), siblingOverrides);
+
+    // Staffing cost from actual recorded hours
+    let staffing = 0;
+    for (const dateStr in cd.coachesByDate) {
+      for (const c of cd.coachesByDate[dateStr]) {
+        if (!c.name || c.name === 'No Staffing') continue;
+        const rate = coachRates[c.name] || 0;
+        const cost = c.hours * rate;
+        staffing += cost;
+        if (!coachTotals[c.name]) coachTotals[c.name] = { hours: 0, cost: 0 };
+        coachTotals[c.name].hours += c.hours;
+        coachTotals[c.name].cost += cost;
+      }
+    }
+
+    clinicRows.push({
+      clinic: clinic,
+      sessions: held,
+      noAtt: noAtt,
+      cancelled: cancelled,
+      players: Object.keys(playerSessions).length,
+      checkIns: checkIns,
+      gross: billing.gross,
+      discount: billing.totalDiscount,
+      net: billing.net,
+      staffing: staffing,
+      profit: billing.net - staffing
+    });
+
+    gGross += billing.gross; gDiscount += billing.totalDiscount; gNet += billing.net;
+    gStaffing += staffing; gSessions += held; gCheckIns += checkIns;
+    gNoAtt += noAtt; gCancelled += cancelled;
+  }
+
+  clinicRows.sort((a, b) => a.clinic.localeCompare(b.clinic));
+
+  // ---- Write the tab ----
+  const ss = SpreadsheetApp.openById(BILLING_SHEET_ID);
+  const tabName = 'MASTER Summary - ' + monthName;
+  let sheet = ss.getSheetByName(tabName);
+  if (sheet) ss.deleteSheet(sheet);
+  sheet = ss.insertSheet(tabName, 0);  // keep it as the first tab
+
+  sheet.getRange(1, 1).setValue('IJTA — All Clinics Summary — ' + monthName)
+    .setFontWeight('bold').setFontSize(14);
+  sheet.getRange(2, 1).setValue('Revenue net of sibling discounts, minus staffing cost.')
+    .setFontColor('#666666').setFontStyle('italic');
+
+  const headers = ['Clinic', 'Sessions', 'Players', 'Check-ins',
+    'Gross Revenue', 'Sibling Discounts', 'Net Revenue', 'Staffing Cost', 'Net Profit'];
+  sheet.getRange(4, 1, 1, headers.length).setValues([headers])
+    .setFontWeight('bold').setBackground('#021f3d').setFontColor('white');
+
+  let r = 5;
+  for (const c of clinicRows) {
+    sheet.getRange(r, 1, 1, headers.length).setValues([[
+      c.clinic, c.sessions, c.players, c.checkIns,
+      c.gross, c.discount > 0 ? -c.discount : 0, c.net, -c.staffing, c.profit
+    ]]);
+    r++;
+  }
+
+  const firstDataRow = 5;
+  const dataCount = clinicRows.length;
+  if (dataCount > 0) {
+    sheet.getRange(firstDataRow, 5, dataCount, 5).setNumberFormat('$#,##0.00');
+  }
+
+  // Grand total
+  const totalRow = firstDataRow + dataCount;
+  sheet.getRange(totalRow, 1, 1, headers.length).setValues([[
+    'TOTAL — ALL CLINICS', gSessions, '', gCheckIns,
+    gGross, gDiscount > 0 ? -gDiscount : 0, gNet, -gStaffing, gNet - gStaffing
+  ]]);
+  sheet.getRange(totalRow, 1, 1, headers.length)
+    .setFontWeight('bold').setBackground('#e8eef5').setBorder(true, true, true, true, false, false);
+  sheet.getRange(totalRow, 5, 1, 5).setNumberFormat('$#,##0.00');
+  sheet.getRange(totalRow, 9).setFontColor((gNet - gStaffing) >= 0 ? '#2e7d32' : '#c62828');
+
+  // Bottom-line callout
+  let row = totalRow + 2;
+  sheet.getRange(row, 1).setValue('NET PROFIT').setFontWeight('bold').setFontSize(13);
+  sheet.getRange(row, 2).setValue(gNet - gStaffing).setNumberFormat('$#,##0.00')
+    .setFontWeight('bold').setFontSize(13)
+    .setFontColor((gNet - gStaffing) >= 0 ? '#2e7d32' : '#c62828');
+  row += 2;
+
+  if (gNoAtt > 0 || gCancelled > 0) {
+    let note = 'Also this month: ';
+    const bits = [];
+    if (gNoAtt > 0) bits.push(gNoAtt + ' session' + (gNoAtt !== 1 ? 's' : '') + ' with no attendees');
+    if (gCancelled > 0) bits.push(gCancelled + ' cancelled session' + (gCancelled !== 1 ? 's' : ''));
+    sheet.getRange(row, 1).setValue(note + bits.join(', ') + ' (no revenue or staffing cost).')
+      .setFontColor('#666666').setFontStyle('italic');
+    row += 2;
+  }
+
+  // Staffing breakdown across all clinics
+  sheet.getRange(row, 1).setValue('STAFFING BY COACH (all clinics)').setFontWeight('bold').setFontSize(11);
+  row++;
+  const staffHeaders = ['Coach', 'Total Hours', 'Rate ($/hr)', 'Total Cost'];
+  sheet.getRange(row, 1, 1, staffHeaders.length).setValues([staffHeaders])
+    .setFontWeight('bold').setBackground('#e65100').setFontColor('white');
+  row++;
+  const coachNames = Object.keys(coachTotals).sort();
+  const staffStart = row;
+  for (const name of coachNames) {
+    sheet.getRange(row, 1, 1, 4).setValues([[
+      name, coachTotals[name].hours, coachRates[name] || 0, coachTotals[name].cost
+    ]]);
+    row++;
+  }
+  if (coachNames.length > 0) {
+    sheet.getRange(staffStart, 3, coachNames.length, 2).setNumberFormat('$#,##0.00');
+    sheet.getRange(row, 1).setValue('TOTAL STAFFING').setFontWeight('bold');
+    sheet.getRange(row, 4).setValue(gStaffing).setNumberFormat('$#,##0.00').setFontWeight('bold');
+  }
+
+  sheet.setColumnWidth(1, 220);
+  for (let c = 2; c <= 4; c++) sheet.setColumnWidth(c, 90);
+  for (let c = 5; c <= 9; c++) sheet.setColumnWidth(c, 130);
+  sheet.setFrozenRows(4);
+
+  Logger.log('Master A/S summary for ' + monthName + ': net revenue $' + gNet +
+    ', staffing $' + gStaffing + ', net profit $' + (gNet - gStaffing));
+  return { net: gNet, staffing: gStaffing, profit: gNet - gStaffing, monthName: monthName };
+}
+
+function generateCurrentMonthMasterSummary() {
+  const now = new Date();
+  return generateMasterASSummary(now.getMonth() + 1, now.getFullYear());
+}
+
+function generateLastMonthMasterSummary() {
+  const now = new Date();
+  let month = now.getMonth();
+  let year = now.getFullYear();
+  if (month === 0) { month = 12; year--; }
+  return generateMasterASSummary(month, year);
+}
+
+function menuCurrentMonthMaster() {
+  const result = generateCurrentMonthMasterSummary();
+  const ui = SpreadsheetApp.getUi();
+  ui.alert(result
+    ? 'Master summary generated for ' + result.monthName + '.\n\n' +
+      'Net revenue: $' + result.net.toFixed(2) + '\n' +
+      'Staffing: $' + result.staffing.toFixed(2) + '\n' +
+      'NET PROFIT: $' + result.profit.toFixed(2)
+    : 'No attendance data found for this month.');
+}
+
+function menuLastMonthMaster() {
+  const result = generateLastMonthMasterSummary();
+  const ui = SpreadsheetApp.getUi();
+  ui.alert(result
+    ? 'Master summary generated for ' + result.monthName + '.\n\n' +
+      'Net revenue: $' + result.net.toFixed(2) + '\n' +
+      'Staffing: $' + result.staffing.toFixed(2) + '\n' +
+      'NET PROFIT: $' + result.profit.toFixed(2)
+    : 'No attendance data found for last month.');
+}
+
 function generateCurrentMonthASSummary() {
   const now = new Date();
   generateAttendanceAndStaffingSummary(now.getMonth() + 1, now.getFullYear());
@@ -1608,6 +1851,7 @@ function generateLastMonthASSummary() {
 function generateAllReports(monthOverride, yearOverride) {
   generateMonthlyBilling(monthOverride, yearOverride);
   generateAttendanceAndStaffingSummary(monthOverride, yearOverride);
+  generateMasterASSummary(monthOverride, yearOverride);
 }
 
 function generateCurrentMonthAllReports() {
@@ -1638,6 +1882,9 @@ function onOpen() {
   ui.createMenu('IJTA Reports')
     .addItem('Generate This Month — All Reports', 'menuCurrentMonthAll')
     .addItem('Generate Last Month — All Reports', 'menuLastMonthAll')
+    .addSeparator()
+    .addItem('Master Summary (All Clinics) — This Month', 'menuCurrentMonthMaster')
+    .addItem('Master Summary (All Clinics) — Last Month', 'menuLastMonthMaster')
     .addSeparator()
     .addItem('Generate This Month — Billing Only', 'menuCurrentMonthBilling')
     .addItem('Generate This Month — A/S Summary Only', 'menuCurrentMonthAS')
