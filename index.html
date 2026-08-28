@@ -1413,6 +1413,11 @@
             } else if (noAttendees) {
                 btn.disabled = false;
                 btn.textContent = 'Submit — No Attendees';
+            } else if (players.length === 0 && !noStaffing && coaches.length > 0) {
+                // Adding a coach who was left off a roll already submitted
+                // for this date — no players needed.
+                btn.disabled = false;
+                btn.textContent = 'Add Staffing Only';
             } else if (players.length === 0) {
                 btn.disabled = true;
                 btn.textContent = 'Select at least one player';
@@ -1477,7 +1482,10 @@
                 players: players,
                 noAttendees: noAttendees,
                 cancelled: cancelled,
-                cancelReason: cancelled ? document.getElementById('cancel-reason').value : ''
+                cancelReason: cancelled ? document.getElementById('cancel-reason').value : '',
+                // Adding staff to a roll already submitted for this date
+                staffingOnly: !cancelled && !noAttendees && !noStaffing &&
+                    players.length === 0 && coaches.length > 0
             };
 
             try {
@@ -1496,10 +1504,14 @@
                             `${selectedClinic.display} marked as cancelled (${payload.cancelReason}).`;
                         document.getElementById('success-overlay').classList.add('active');
                     } else {
-                        showSuccess(noAttendees ? 0 : players.length, coaches);
+                        showSuccess(noAttendees ? 0 : players.length, coaches, result);
                     }
                 } else {
-                    throw new Error(result.error || 'Unknown server error');
+                    // The server explained what's wrong — show that, not a
+                    // generic connection error
+                    showError(result.error || 'The server rejected this submission.');
+                    btn.disabled = false;
+                    updateSubmitButton();
                 }
             } catch (error) {
                 console.error('Submit error:', error);
@@ -1519,14 +1531,31 @@
             document.getElementById('error-message').classList.remove('visible');
         }
 
-        function showSuccess(playerCount, coaches) {
+        function showSuccess(playerCount, coaches, result) {
+            const coachNames = coaches.map(c => typeof c === 'string' ? c : c.name).join(', ');
             let msg;
-            if (playerCount === 0) {
+
+            if (result && result.staffingOnly) {
+                const staff = (result.coachesAddedToSession || []).join(', ');
+                msg = staff
+                    ? `Added staffing for ${staff} to the ${selectedClinic.display} roll.`
+                    : `${coachNames} ${coaches.length === 1 ? 'was' : 'were'} already recorded on this roll — nothing changed.`;
+            } else if (playerCount === 0) {
                 msg = `No attendees recorded for ${selectedClinic.display}.`;
+            } else if (result && typeof result.playersRecorded === 'number' && result.addedToExistingSession) {
+                // This date+clinic already had a roll — report what actually changed
+                const added = result.playersRecorded;
+                const staff = (result.coachesAddedToSession || []).join(', ');
+                const parts = [];
+                if (added > 0) parts.push(`${added} new player${added !== 1 ? 's' : ''}`);
+                if (staff) parts.push(`staffing for ${staff}`);
+                msg = parts.length
+                    ? `Added ${parts.join(' and ')} to the existing ${selectedClinic.display} roll.`
+                    : `${selectedClinic.display} was already fully recorded for this date — nothing new to add.`;
             } else {
-                const coachNames = coaches.map(c => typeof c === 'string' ? c : c.name).join(', ');
                 msg = `${playerCount} player${playerCount !== 1 ? 's' : ''} recorded for ${selectedClinic.display} with ${coachNames}.`;
             }
+
             document.getElementById('success-message').textContent = msg;
             document.getElementById('success-overlay').classList.add('active');
         }

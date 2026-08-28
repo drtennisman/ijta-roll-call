@@ -82,7 +82,9 @@ function doPost(e) {
     // submissions ("Retry" after a timeout whose first attempt actually
     // landed) and re-takes writing duplicate player rows.
     const existingPlayers = {};
+    const existingCoachNames = {};   // lowercase name -> true, across the session
     let sessionHasRows = false;
+    let sessionFirstRow = -1;        // 1-based sheet row where coaches live
     {
       const existing = sheet.getDataRange().getValues();
       const target = parseDate(date);
@@ -94,8 +96,15 @@ function doPost(e) {
             rd.getDate() !== target.getDate()) continue;
         if ((existing[i][1] || '').toString().trim() !== clinic) continue;
         sessionHasRows = true;
+        if (sessionFirstRow === -1) sessionFirstRow = i + 1;
         const pn = (existing[i][3] || '').toString().trim().toLowerCase();
         if (pn) existingPlayers[pn] = true;
+        const cs = (existing[i][2] || '').toString().trim();
+        if (cs) {
+          parseCoachEntries(cs, 1).forEach(c => {
+            if (c.name) existingCoachNames[c.name.toLowerCase()] = true;
+          });
+        }
       }
     }
 
@@ -116,6 +125,42 @@ function doPost(e) {
     const coachesStr = coaches.map(c =>
       typeof c === 'string' ? c : `${c.name} (${c.hours}h)`
     ).join(', ');
+
+    // "Add Staffing Only" — adding a coach to a roll already submitted for
+    // this date, with no players to record. Refuse loudly if there's no
+    // roll to attach them to, rather than accepting and losing the coach.
+    if (data.staffingOnly && !sessionHasRows) {
+      return ContentService
+        .createTextOutput(JSON.stringify({
+          success: false,
+          error: 'No roll has been submitted for ' + clinic + ' on ' + date +
+                 '. Submit the roll with its players first, then add staffing.'
+        }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
+    // Adding staff to a session already logged (e.g. a coach who was left
+    // off a past roll): merge them into that session's coach cell. Without
+    // this, a submission whose players are all duplicates would write no
+    // rows at all and the coach would be silently lost.
+    // "No Staffing" is never merged into a session that already has rows —
+    // it would just add a meaningless $0 line beside the real coaches.
+    let coachesAddedToSession = [];
+    if (sessionHasRows && sessionFirstRow !== -1) {
+      const toAdd = coaches
+        .filter(c => typeof c !== 'string' && c.name && c.name !== 'No Staffing')
+        .filter(c => !existingCoachNames[c.name.toLowerCase()]);
+      if (toAdd.length > 0) {
+        const cell = sheet.getRange(sessionFirstRow, 3);
+        const current = (cell.getValue() || '').toString().trim();
+        const addition = toAdd.map(c => `${c.name} (${c.hours}h)`).join(', ');
+        // Replace a lone "No Staffing" rather than appending beside real coaches
+        const base = (current && current !== 'No Staffing') ? current + ', ' : '';
+        cell.setValue(base + addition);
+        toAdd.forEach(c => { existingCoachNames[c.name.toLowerCase()] = true; });
+        coachesAddedToSession = toAdd.map(c => c.name);
+      }
+    }
 
     // Players now come as objects: { name: "Last, First", status: "M"|"G" }
     // Add one row per player — but only players NOT already logged for
@@ -141,10 +186,13 @@ function doPost(e) {
       }
       for (let i = 0; i < newPlayers.length; i++) {
         const player = newPlayers[i];
+        // Coaches go on the first row of a NEW session. For an existing
+        // session they were merged into its coach cell above, so leave
+        // these blank rather than repeating them.
         sheet.appendRow([
           date,
           clinic,
-          i === 0 ? coachesStr : '',  // Coaches only on first row
+          (!sessionHasRows && i === 0) ? coachesStr : '',
           player.name,
           player.status || 'M'
         ]);
@@ -159,7 +207,16 @@ function doPost(e) {
     const coachesAdded = addNewCoachesToRoster(newCoaches || []);
 
     return ContentService
-      .createTextOutput(JSON.stringify({ success: true, playersRecorded: recorded, duplicatesSkipped: duplicatesSkipped, rosterAdded: added, coachesAdded: coachesAdded }))
+      .createTextOutput(JSON.stringify({
+        success: true,
+        playersRecorded: recorded,
+        duplicatesSkipped: duplicatesSkipped,
+        coachesAddedToSession: coachesAddedToSession,
+        addedToExistingSession: sessionHasRows,
+        staffingOnly: data.staffingOnly === true,
+        rosterAdded: added,
+        coachesAdded: coachesAdded
+      }))
       .setMimeType(ContentService.MimeType.JSON);
 
   } catch (error) {
@@ -181,7 +238,7 @@ function doGet(e) {
       .setMimeType(ContentService.MimeType.JSON);
   }
   return ContentService
-    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'master-summary-v2' }))
+    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'add-staff-later-v1' }))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -842,22 +899,29 @@ function generateMonthlyBilling(monthOverride, yearOverride) {
     const tabName = clinic + ' - Billing - ' + monthName;
     let sheet = billingSS.getSheetByName(tabName);
 
-    // Preserve Charged?/Charged On from the existing tab so regenerating
-    // the report never loses the shop manager's progress
-    const prevCharged = {};
+    // Preserve Charged?/Charged On/Outreach/Last Contact from the existing
+    // tab so regenerating the report never loses the shop manager's work
+    const prevState = {};
     if (sheet) {
       const prevData = sheet.getDataRange().getValues();
       if (prevData.length > 1) {
         const prevHeaders = prevData[0];
         const cCol = prevHeaders.indexOf('Charged?');
         const dCol = prevHeaders.indexOf('Charged On');
-        if (cCol !== -1) {
-          for (let i = 1; i < prevData.length; i++) {
-            const pname = (prevData[i][0] || '').toString().trim().toLowerCase();
-            if (pname && prevData[i][cCol] === true) {
-              prevCharged[pname] = dCol !== -1 ? prevData[i][dCol] : '';
-            }
-          }
+        const oCol = prevHeaders.indexOf('Outreach');
+        const lCol = prevHeaders.indexOf('Last Contact');
+        for (let i = 1; i < prevData.length; i++) {
+          const pname = (prevData[i][0] || '').toString().trim().toLowerCase();
+          if (!pname) continue;
+          const charged = cCol !== -1 && prevData[i][cCol] === true;
+          const outreach = oCol !== -1 ? (prevData[i][oCol] || '').toString().trim() : '';
+          if (!charged && !outreach) continue;
+          prevState[pname] = {
+            charged: charged,
+            chargedOn: (charged && dCol !== -1) ? prevData[i][dCol] : '',
+            outreach: outreach,
+            lastContact: lCol !== -1 ? prevData[i][lCol] : ''
+          };
         }
       }
       billingSS.deleteSheet(sheet);
@@ -865,17 +929,17 @@ function generateMonthlyBilling(monthOverride, yearOverride) {
     sheet = billingSS.insertSheet(tabName);
 
     // Header
-    const headers = ['Player Name', 'Status', 'Sessions', 'Total', 'Sibling Discount', 'Final Charge', 'Charged?', 'Charged On', 'Note'];
+    const headers = ['Player Name', 'Status', 'Sessions', 'Total', 'Sibling Discount',
+      'Final Charge', 'Charged?', 'Charged On', 'Outreach', 'Last Contact', 'Note'];
     sheet.appendRow(headers);
     const headerRange = sheet.getRange(1, 1, 1, headers.length);
     headerRange.setFontWeight('bold');
     headerRange.setBackground('#2e7d32');
     headerRange.setFontColor('white');
 
-    // Data rows (restoring any Charged? ticks captured above)
+    // Data rows (restoring any charged ticks / outreach captured above)
     for (const row of billingRows) {
-      const key = row.name.toLowerCase();
-      const wasCharged = Object.prototype.hasOwnProperty.call(prevCharged, key);
+      const prev = prevState[row.name.toLowerCase()] || {};
       sheet.appendRow([
         row.name,
         row.status,
@@ -883,17 +947,23 @@ function generateMonthlyBilling(monthOverride, yearOverride) {
         row.total,
         row.discount > 0 ? row.discount : '',
         row.finalTotal,
-        wasCharged,
-        wasCharged ? (prevCharged[key] || new Date()) : '',
+        prev.charged === true,
+        prev.charged === true ? (prev.chargedOn || new Date()) : '',
+        prev.outreach || '',
+        prev.lastContact || '',
         row.siblingNote
       ]);
     }
 
-    // Checkboxes, currency/date formats, and sibling highlights
+    // Checkboxes, outreach dropdown, formats, and sibling highlights
     if (billingRows.length > 0) {
       sheet.getRange(2, 7, billingRows.length, 1).insertCheckboxes();
       sheet.getRange(2, 4, billingRows.length, 3).setNumberFormat('$#,##0.00');
       sheet.getRange(2, 8, billingRows.length, 1).setNumberFormat('M/d/yyyy');
+      sheet.getRange(2, 10, billingRows.length, 1).setNumberFormat('M/d/yyyy');
+      const outreachRule = SpreadsheetApp.newDataValidation()
+        .requireValueInList(OUTREACH_LEVELS, true).build();
+      sheet.getRange(2, 9, billingRows.length, 1).setDataValidation(outreachRule);
       for (let i = 0; i < billingRows.length; i++) {
         if (billingRows[i].isSibling) {
           sheet.getRange(i + 2, 1, 1, headers.length).setBackground('#fff9c4');
@@ -910,7 +980,9 @@ function generateMonthlyBilling(monthOverride, yearOverride) {
     sheet.setColumnWidth(6, 110);
     sheet.setColumnWidth(7, 90);
     sheet.setColumnWidth(8, 110);
-    sheet.setColumnWidth(9, 220);
+    sheet.setColumnWidth(9, 130);
+    sheet.setColumnWidth(10, 110);
+    sheet.setColumnWidth(11, 220);
     sheet.setFrozenRows(1);
 
     // Summary at bottom
@@ -959,16 +1031,25 @@ function generateLastMonthBilling() {
 // ============================================================
 // Each billing tab has a per-player "Charged?" checkbox the shop manager
 // ticks after charging that family in the system; "Charged On" stamps
-// itself automatically. A weekly digest (Mon ~7am) emails everyone on the
+// itself automatically. An "Outreach" dropdown tracks follow-up attempts
+// (1st / 2nd / 3rd / No response), and "Last Contact" stamps itself the
+// same way. A weekly digest (Mon ~7am) emails everyone on the
 // self-installing "Billing Reminders" tab (in the ROSTER spreadsheet)
-// a list of players still uncharged. Items older than 14 days past the
-// end of their billing month get a warning flag.
+// a list of players still uncharged, showing how many times each has been
+// contacted and when. Items older than 14 days past the end of their
+// billing month get a warning flag, and anyone at the final outreach stage
+// is called out separately for escalation.
 //
 // ONE-TIME SETUP: run setupBillingReminders() once from the editor, then
 // add your shop manager's email to the "Billing Reminders" tab.
 // ============================================================
 
 const BILLING_AGING_DAYS = 14;
+
+// Outreach dropdown options, in escalation order. The last two mark a
+// family as needing escalation in the weekly digest.
+const OUTREACH_LEVELS = ['1st attempt', '2nd attempt', '3rd attempt', 'No response'];
+const OUTREACH_ESCALATE = ['3rd attempt', 'No response'];
 
 function getBillingReminderRecipients() {
   const sheet = SpreadsheetApp.openById(ROSTER_SHEET_ID).getSheetByName('Billing Reminders');
@@ -984,6 +1065,7 @@ function getBillingReminderRecipients() {
 
 // Installable onEdit trigger on the BILLING spreadsheet: when a Charged?
 // box is ticked, stamp today's date in Charged On (clear it when unticked).
+// Also stamps Last Contact whenever the Outreach dropdown is set.
 function onBillingEdit(e) {
   try {
     const sheet = e.range.getSheet();
@@ -991,16 +1073,26 @@ function onBillingEdit(e) {
     const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
     const chargedCol = headers.indexOf('Charged?') + 1;
     const chargedOnCol = headers.indexOf('Charged On') + 1;
-    if (!chargedCol || !chargedOnCol) return;
-    if (e.range.getColumn() !== chargedCol) return;
+    const outreachCol = headers.indexOf('Outreach') + 1;
+    const lastContactCol = headers.indexOf('Last Contact') + 1;
+    const editedCol = e.range.getColumn();
+
+    const isCharged = chargedCol && chargedOnCol && editedCol === chargedCol;
+    const isOutreach = outreachCol && lastContactCol && editedCol === outreachCol;
+    if (!isCharged && !isOutreach) return;
+
+    const srcCol = isCharged ? chargedCol : outreachCol;
+    const stampCol = isCharged ? chargedOnCol : lastContactCol;
 
     const startRow = e.range.getRow();
     for (let r = 0; r < e.range.getNumRows(); r++) {
       const row = startRow + r;
       if (row === 1) continue;
-      const checked = sheet.getRange(row, chargedCol).getValue() === true;
-      const cell = sheet.getRange(row, chargedOnCol);
-      cell.setValue(checked ? new Date() : '');
+      const value = sheet.getRange(row, srcCol).getValue();
+      // Charged? is a checkbox (true/false); Outreach is a non-empty string
+      const isSet = isCharged ? (value === true) : (value !== '' && value !== null);
+      const cell = sheet.getRange(row, stampCol);
+      cell.setValue(isSet ? new Date() : '');
       cell.setNumberFormat('M/d/yyyy');
     }
   } catch (err) {
@@ -1021,8 +1113,10 @@ function sendUnchargedBillingDigest() {
   const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
     'July', 'August', 'September', 'October', 'November', 'December'];
   const ss = SpreadsheetApp.openById(BILLING_SHEET_ID);
-  const groups = {}; // "Clinic (Month Year)" -> [{ player, amount, aged }]
+  const groups = {}; // "Clinic (Month Year)" -> [{ player, amount, aged, outreach, ... }]
+  const escalations = [];  // at final outreach stage and still uncharged
   let count = 0;
+  let notContacted = 0;
 
   for (const sheet of ss.getSheets()) {
     const name = sheet.getName();
@@ -1036,6 +1130,8 @@ function sendUnchargedBillingDigest() {
     const headers = data[0];
     const chargedCol = headers.indexOf('Charged?');
     const finalCol = headers.indexOf('Final Charge');
+    const outreachCol = headers.indexOf('Outreach');
+    const lastContactCol = headers.indexOf('Last Contact');
     if (chargedCol === -1 || finalCol === -1) continue; // old-format tab
 
     // Aged = more than BILLING_AGING_DAYS past the end of the billing month
@@ -1055,13 +1151,22 @@ function sendUnchargedBillingDigest() {
       if (!player) continue;
       if (data[i][chargedCol] === true) continue;
 
+      const outreach = outreachCol !== -1 ? (data[i][outreachCol] || '').toString().trim() : '';
+      const lastContact = lastContactCol !== -1 ? data[i][lastContactCol] : '';
+      const escalate = OUTREACH_ESCALATE.indexOf(outreach) !== -1;
+
       const label = clinic + ' (' + monthLabel + ')';
       if (!groups[label]) groups[label] = [];
       groups[label].push({
         player: player,
         amount: Number(data[i][finalCol]) || 0,
-        aged: aged
+        aged: aged,
+        outreach: outreach,
+        lastContact: lastContact,
+        escalate: escalate
       });
+      if (escalate) escalations.push({ player: player, label: label, amount: Number(data[i][finalCol]) || 0, outreach: outreach });
+      if (!outreach) notContacted++;
       count++;
     }
   }
@@ -1069,19 +1174,50 @@ function sendUnchargedBillingDigest() {
   if (count === 0) return 0; // all charged - stay quiet
 
   // Plain-ASCII subject; HTML entities in the body (mail-safe)
-  const subject = 'Uncharged Billing Alert - ' + count + ' player' + (count !== 1 ? 's' : '') + ' outstanding';
+  const tz = Session.getScriptTimeZone();
+  const fmtDate = (d) => {
+    if (!d) return '';
+    try { return (d instanceof Date) ? Utilities.formatDate(d, tz, 'M/d') : String(d); }
+    catch (err) { return ''; }
+  };
+
+  let subject = 'Uncharged Billing Alert - ' + count + ' player' + (count !== 1 ? 's' : '') + ' outstanding';
+  if (escalations.length > 0) subject += ' (' + escalations.length + ' need escalation)';
+
   let html = '<div style="font-family:Arial,sans-serif;color:#333;">';
   html += '<h2 style="color:#c62828;margin-bottom:4px;">&#9888;&#65039; Uncharged Billing</h2>';
-  html += '<p>These players have <strong>not been marked as charged</strong> on the billing sheet:</p>';
+  html += '<p>' + count + ' player' + (count !== 1 ? 's have' : ' has') +
+    ' <strong>not been marked as charged</strong>' +
+    (notContacted > 0 ? ' &mdash; ' + notContacted + ' not yet contacted' : '') + '.</p>';
+
+  // Escalation block first — these have exhausted normal follow-up
+  if (escalations.length > 0) {
+    html += '<div style="background:#ffebee;border-left:4px solid #c62828;padding:10px 14px;margin:12px 0;">';
+    html += '<strong style="color:#c62828;">Needs escalation</strong><ul style="margin:6px 0 0 0;">';
+    for (const e of escalations) {
+      html += '<li>' + e.player + ' &mdash; $' + e.amount.toFixed(2) +
+        ' &mdash; <em>' + e.outreach + '</em> <span style="color:#888;">(' + e.label + ')</span></li>';
+    }
+    html += '</ul></div>';
+  }
+
   for (const label in groups) {
     html += '<p style="margin-bottom:2px;"><strong>' + label + '</strong></p><ul style="margin-top:2px;">';
     for (const item of groups[label]) {
-      html += '<li>' + item.player + ' &mdash; $' + item.amount.toFixed(2) +
-        (item.aged ? ' &#9888;&#65039; ' + BILLING_AGING_DAYS + '+ days' : '') + '</li>';
+      let line = '<li>' + item.player + ' &mdash; $' + item.amount.toFixed(2);
+      if (item.outreach) {
+        const when = fmtDate(item.lastContact);
+        line += ' &mdash; <em>' + item.outreach + (when ? ' on ' + when : '') + '</em>';
+      } else {
+        line += ' &mdash; <span style="color:#888;">not contacted yet</span>';
+      }
+      if (item.aged) line += ' &#9888;&#65039; ' + BILLING_AGING_DAYS + '+ days';
+      html += line + '</li>';
     }
     html += '</ul>';
   }
-  html += '<p>Tick the "Charged?" box on the billing sheet as each one is entered.</p></div>';
+  html += '<p style="color:#666;font-size:13px;">On the billing sheet: tick <strong>Charged?</strong> once entered, ' +
+    'or set <strong>Outreach</strong> after each attempt to reach the family (the date fills in automatically).</p></div>';
 
   MailApp.sendEmail({ to: recipients.join(','), subject: subject, htmlBody: html });
   return count;
