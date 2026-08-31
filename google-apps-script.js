@@ -238,7 +238,7 @@ function doGet(e) {
       .setMimeType(ContentService.MimeType.JSON);
   }
   return ContentService
-    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'always-show-hours-v1' }))
+    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'no-extra-scope-v1' }))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -1173,12 +1173,13 @@ function sendUnchargedBillingDigest() {
 
   if (count === 0) return 0; // all charged - stay quiet
 
-  // Plain-ASCII subject; HTML entities in the body (mail-safe)
-  const tz = Session.getScriptTimeZone();
+  // Plain-ASCII subject; HTML entities in the body (mail-safe).
+  // Formatted with plain date math (like the rest of this file) rather
+  // than Session/Utilities, which would require an extra OAuth scope.
   const fmtDate = (d) => {
     if (!d) return '';
-    try { return (d instanceof Date) ? Utilities.formatDate(d, tz, 'M/d') : String(d); }
-    catch (err) { return ''; }
+    if (d instanceof Date) return (d.getMonth() + 1) + '/' + d.getDate();
+    return String(d);
   };
 
   let subject = 'Uncharged Billing Alert - ' + count + ' player' + (count !== 1 ? 's' : '') + ' outstanding';
