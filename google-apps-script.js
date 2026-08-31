@@ -238,7 +238,7 @@ function doGet(e) {
       .setMimeType(ContentService.MimeType.JSON);
   }
   return ContentService
-    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'partial-hours-display-v1' }))
+    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'always-show-hours-v1' }))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -1442,7 +1442,6 @@ function generateAttendanceAndStaffingSummary(monthOverride, yearOverride) {
 
   // Read config data from roster spreadsheet
   const coachRates = getCoachRates();
-  const sessionDurations = getClinicSessionDurations();
   const siblingOverrides = getSiblingOverrides();
 
   // Organize data by clinic
@@ -1512,8 +1511,6 @@ function generateAttendanceAndStaffingSummary(monthOverride, yearOverride) {
     }
     sheet = billingSS.insertSheet(tabName);
 
-    const sessionHours = sessionDurations[clinic] || 1;
-
     // === SECTION 1: ATTENDANCE BY DATE ===
     sheet.getRange(1, 1).setValue(clinic + ' \u2014 Attendance & Staffing Summary \u2014 ' + monthName);
     sheet.getRange(1, 1).setFontWeight('bold');
@@ -1545,10 +1542,9 @@ function generateAttendanceAndStaffingSummary(monthOverride, yearOverride) {
       const marker = (cd.markersByDate && cd.markersByDate[dateStr]) || null;
 
       const dateCoaches = cd.coachesByDate[dateStr] || [];
-      // Show hours only when they differ from THIS clinic's full session
-      // length (e.g. 1h on a 2h HS session), so a partial shift is visible
+      // Always show hours beside every coach, so a shift is never ambiguous
       const coachesDisplay = dateCoaches.map(c =>
-        c.hours !== sessionHours ? `${c.name} (${c.hours}h)` : c.name
+        `${c.name} (${c.hours}h)`
       ).join(', ') || '(none recorded)';
 
       sheet.getRange(currentRow, 1).setValue(dateStr);
