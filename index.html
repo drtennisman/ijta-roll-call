@@ -662,6 +662,23 @@
             font-style: italic;
         }
 
+        /* Unsent rolls saved on this device */
+        .pending-banner {
+            background: #e3f2fd;
+            border: 2px solid #1565c0;
+            border-radius: 12px;
+            padding: 12px 16px;
+            margin-bottom: 14px;
+            font-size: 14px;
+            color: #0d47a1;
+            line-height: 1.5;
+        }
+
+        .pending-banner strong {
+            display: block;
+            margin-bottom: 4px;
+        }
+
         .clinic-btn .missing-badge {
             float: right;
             background: #ffebee;
@@ -688,6 +705,7 @@
             </div>
         </div>
         <div class="container">
+            <div id="pending-banner" class="pending-banner" style="display:none;"></div>
             <div id="missing-banner" class="missing-banner" style="display:none;"></div>
             <div id="clinic-list">
                 <div class="loading">
@@ -833,6 +851,9 @@
             loadCoaches();
             checkAppsScriptUrl();
             loadMissingRolls();
+            // Re-send anything that couldn't go out last time
+            updatePendingBanner();
+            flushPendingRolls(false);
         });
 
         function checkAppsScriptUrl() {
@@ -1002,6 +1023,104 @@
             updateMissingBadges();
         }
 
+        // ==================== UNSENT ROLL QUEUE ====================
+        // If a submission fails (dropped signal, screen lock, etc.) the roll
+        // is saved on the device instead of being lost, then re-sent
+        // automatically the next time the app opens or the network returns.
+        // Re-sending is safe: the server ignores players already logged for
+        // that clinic+date, so a roll that actually landed won't duplicate.
+        const PENDING_KEY = 'ijta_pending_rolls';
+
+        function getPendingRolls() {
+            try {
+                const raw = localStorage.getItem(PENDING_KEY);
+                const list = raw ? JSON.parse(raw) : [];
+                return Array.isArray(list) ? list : [];
+            } catch (e) {
+                return [];
+            }
+        }
+
+        function savePendingRolls(list) {
+            try {
+                localStorage.setItem(PENDING_KEY, JSON.stringify(list));
+            } catch (e) {
+                console.error('Could not save pending rolls:', e);
+            }
+        }
+
+        function queuePendingRoll(payload) {
+            const list = getPendingRolls();
+            list.push({
+                id: Date.now() + '-' + Math.random().toString(36).slice(2, 8),
+                savedAt: new Date().toISOString(),
+                payload: payload
+            });
+            savePendingRolls(list);
+            updatePendingBanner();
+        }
+
+        // Tries to send everything queued. Returns { sent, failed }.
+        async function flushPendingRolls(showResult) {
+            let list = getPendingRolls();
+            if (list.length === 0 || !APPS_SCRIPT_URL) return { sent: 0, failed: 0 };
+
+            let sent = 0, failed = 0;
+            const remaining = [];
+            for (const item of list) {
+                try {
+                    const response = await fetch(APPS_SCRIPT_URL, {
+                        method: 'POST',
+                        redirect: 'follow',
+                        headers: { 'Content-Type': 'text/plain' },
+                        body: JSON.stringify(item.payload)
+                    });
+                    const result = await response.json();
+                    if (result && result.success) {
+                        sent++;
+                    } else {
+                        // Server rejected it on its merits — retrying won't
+                        // help, so drop it rather than retrying forever
+                        console.error('Queued roll rejected:', result && result.error);
+                        sent++;
+                    }
+                } catch (e) {
+                    remaining.push(item);   // still offline — keep for later
+                    failed++;
+                }
+            }
+            savePendingRolls(remaining);
+            updatePendingBanner();
+            if (showResult && sent > 0) {
+                alert(sent + ' saved roll' + (sent !== 1 ? 's were' : ' was') + ' sent successfully.');
+                loadMissingRolls();
+            }
+            return { sent: sent, failed: failed };
+        }
+
+        function updatePendingBanner() {
+            const banner = document.getElementById('pending-banner');
+            if (!banner) return;
+            const list = getPendingRolls();
+            if (list.length === 0) {
+                banner.style.display = 'none';
+                return;
+            }
+            const names = list.map(i => {
+                const p = i.payload || {};
+                return `${p.clinic || 'Roll'} (${p.date || '?'})`;
+            }).join(', ');
+            banner.innerHTML =
+                `<strong>&#128228; ${list.length} roll${list.length !== 1 ? 's' : ''} waiting to send</strong>` +
+                `<div>${names}</div>` +
+                `<div class="missing-hint">Saved on this device. They'll send automatically &mdash; or tap below.</div>` +
+                `<button class="add-player-btn" style="margin-top:8px;" onclick="flushPendingRolls(true)">Send now</button>`;
+            banner.style.display = '';
+        }
+
+        // Re-send whenever the network comes back
+        window.addEventListener('online', () => flushPendingRolls(false));
+
         // ==================== MISSING ROLL ALERTS ====================
         async function loadMissingRolls() {
             if (!APPS_SCRIPT_URL) return;
@@ -1067,6 +1186,9 @@
             loadAllRosters();
             loadCoaches();
             loadMissingRolls();
+            // And retry anything still waiting to send
+            updatePendingBanner();
+            flushPendingRolls(false);
         }
 
         function showRollScreen() {
@@ -1514,10 +1636,16 @@
                     updateSubmitButton();
                 }
             } catch (error) {
+                // Couldn't reach the server — save the roll on this device so
+                // it can't be lost, and let the user know it's safe.
                 console.error('Submit error:', error);
-                showError('Failed to submit attendance. Please check your connection and try again.');
+                queuePendingRoll(payload);
+                document.getElementById('success-message').textContent =
+                    `No connection right now, so this ${selectedClinic.display} roll was saved on your phone. ` +
+                    `It will send automatically when you're back online — you don't need to re-enter it.`;
+                document.getElementById('success-overlay').classList.add('active');
                 btn.disabled = false;
-                btn.textContent = 'Retry Submit';
+                updateSubmitButton();
             }
         }
 
