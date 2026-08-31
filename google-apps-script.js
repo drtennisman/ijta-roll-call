@@ -238,7 +238,7 @@ function doGet(e) {
       .setMimeType(ContentService.MimeType.JSON);
   }
   return ContentService
-    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'add-staff-later-v1' }))
+    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'partial-hours-display-v1' }))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -1545,9 +1545,10 @@ function generateAttendanceAndStaffingSummary(monthOverride, yearOverride) {
       const marker = (cd.markersByDate && cd.markersByDate[dateStr]) || null;
 
       const dateCoaches = cd.coachesByDate[dateStr] || [];
-      // Display coach names with hours only if not a full session
+      // Show hours only when they differ from THIS clinic's full session
+      // length (e.g. 1h on a 2h HS session), so a partial shift is visible
       const coachesDisplay = dateCoaches.map(c =>
-        c.hours !== 1 ? `${c.name} (${c.hours}h)` : c.name
+        c.hours !== sessionHours ? `${c.name} (${c.hours}h)` : c.name
       ).join(', ') || '(none recorded)';
 
       sheet.getRange(currentRow, 1).setValue(dateStr);
