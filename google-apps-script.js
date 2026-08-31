@@ -238,7 +238,7 @@ function doGet(e) {
       .setMimeType(ContentService.MimeType.JSON);
   }
   return ContentService
-    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'schedule-windows-v1' }))
+    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'schedule-windows-v2' }))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -2187,12 +2187,29 @@ function getClinicScheduleDetailed() {
     else if (endsCol === -1 && h.indexOf('end') !== -1) endsCol = c;
   }
 
+  // Accepts a real Date cell, "8/24/2026", "8/24/26" (2-digit year), or
+  // "2026-08-24". A 2-digit year is treated as 20xx — without this, text
+  // like "8/24/26" would parse as the year 26 AD and silently disable the
+  // whole start-date filter.
   const toDate = (v) => {
     if (!v) return null;
-    if (v instanceof Date) { const d = new Date(v); d.setHours(0,0,0,0); return d; }
-    const d = parseDate(v.toString().trim());
-    if (d) d.setHours(0,0,0,0);
-    return d;
+    if (v instanceof Date) { const d = new Date(v); d.setHours(0, 0, 0, 0); return d; }
+    const s = v.toString().trim();
+    if (!s) return null;
+
+    let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);   // ISO
+    if (m) return new Date(+m[1], +m[2] - 1, +m[3]);
+
+    m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/); // M/D/YY or M/D/YYYY
+    if (m) {
+      let year = parseInt(m[3], 10);
+      if (m[3].length === 2) year += 2000;
+      return new Date(year, +m[1] - 1, +m[2]);
+    }
+
+    const parsed = new Date(s);
+    if (!isNaN(parsed.getTime())) { parsed.setHours(0, 0, 0, 0); return parsed; }
+    return null;
   };
 
   const schedule = {};
