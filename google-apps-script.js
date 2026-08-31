@@ -238,7 +238,7 @@ function doGet(e) {
       .setMimeType(ContentService.MimeType.JSON);
   }
   return ContentService
-    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'no-extra-scope-v1' }))
+    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'schedule-windows-v1' }))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -2178,14 +2178,22 @@ function getClinicScheduleDetailed() {
   const data = sheet.getDataRange().getValues();
   if (data.length < 2) return {};
 
-  // Locate the optional Owner column by header text
-  let ownerCol = -1;
+  // Locate the optional Owner / Starts / Ends columns by header text
+  let ownerCol = -1, startsCol = -1, endsCol = -1;
   for (let c = 0; c < data[0].length; c++) {
-    if ((data[0][c] || '').toString().toLowerCase().indexOf('owner') !== -1) {
-      ownerCol = c;
-      break;
-    }
+    const h = (data[0][c] || '').toString().toLowerCase();
+    if (ownerCol === -1 && h.indexOf('owner') !== -1) ownerCol = c;
+    else if (startsCol === -1 && h.indexOf('start') !== -1) startsCol = c;
+    else if (endsCol === -1 && h.indexOf('end') !== -1) endsCol = c;
   }
+
+  const toDate = (v) => {
+    if (!v) return null;
+    if (v instanceof Date) { const d = new Date(v); d.setHours(0,0,0,0); return d; }
+    const d = parseDate(v.toString().trim());
+    if (d) d.setHours(0,0,0,0);
+    return d;
+  };
 
   const schedule = {};
   for (let i = 1; i < data.length; i++) {
@@ -2199,8 +2207,14 @@ function getClinicScheduleDetailed() {
     if (!days.length) continue;
 
     const owner = ownerCol >= 0 ? (data[i][ownerCol] || '').toString().trim() : '';
+    // Optional date range: blank means "always". Lets a clinic start
+    // meeting a new day mid-season without back-flagging every earlier
+    // week as a missing roll.
+    const starts = startsCol >= 0 ? toDate(data[i][startsCol]) : null;
+    const ends = endsCol >= 0 ? toDate(data[i][endsCol]) : null;
 
-    if (!schedule[clinic]) schedule[clinic] = { days: [], owners: [] };
+    if (!schedule[clinic]) schedule[clinic] = { days: [], owners: [], rows: [] };
+    schedule[clinic].rows.push({ days: days, starts: starts, ends: ends });
     days.forEach(d => {
       if (schedule[clinic].days.indexOf(d) === -1) schedule[clinic].days.push(d);
     });
@@ -2209,6 +2223,20 @@ function getClinicScheduleDetailed() {
     }
   }
   return schedule;
+}
+
+// Does this clinic meet on this date, honouring each schedule row's
+// optional Starts/Ends window?
+function clinicMeetsOn(scheduleEntry, date) {
+  if (!scheduleEntry || !scheduleEntry.rows) return false;
+  const wd = date.getDay();
+  for (const row of scheduleEntry.rows) {
+    if (row.days.indexOf(wd) === -1) continue;
+    if (row.starts && date < row.starts) continue;
+    if (row.ends && date > row.ends) continue;
+    return true;
+  }
+  return false;
 }
 
 function getAlertRecipients() {
@@ -2298,7 +2326,7 @@ function getMissingRolls(startDate, endDate) {
     const wd = d.getDay();
     const dateStr = (d.getMonth() + 1) + '/' + d.getDate() + '/' + d.getFullYear();
     for (const clinic in schedule) {
-      if (schedule[clinic].days.indexOf(wd) !== -1 && !logged[dateStr + '|||' + clinic]) {
+      if (clinicMeetsOn(schedule[clinic], d) && !logged[dateStr + '|||' + clinic]) {
         missing.push({ date: dateStr, clinic: clinic, day: DAY_NUM_TO_NAME[wd] });
       }
     }
@@ -2467,6 +2495,36 @@ function setupOwnerColumns() {
   }
 
   Logger.log('Owner/Email columns ready — fill them in on the roster spreadsheet.');
+}
+
+// One-time upgrade: adds optional "Starts" and "Ends" date columns to the
+// Clinic Schedule tab. Leave them blank for a day the clinic has always
+// met. Fill "Starts" when a clinic BEGINS meeting a new day mid-season, so
+// earlier weeks aren't retroactively flagged as missing rolls. A clinic can
+// have several rows — e.g. "Red Ball | Wed" (blank) plus
+// "Red Ball | Mon | Starts 8/24/2026".
+function setupScheduleDateColumns() {
+  const sheet = SpreadsheetApp.openById(ROSTER_SHEET_ID).getSheetByName('Clinic Schedule');
+  if (!sheet) {
+    Logger.log('No "Clinic Schedule" tab found - run setupReminderTabs() first.');
+    return;
+  }
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const has = (word) => headers.some(h => (h || '').toString().toLowerCase().indexOf(word) !== -1);
+
+  let col = sheet.getLastColumn() + 1;
+  if (!has('start')) {
+    sheet.getRange(1, col).setValue('Starts (optional)')
+      .setFontWeight('bold').setBackground('#021f3d').setFontColor('white');
+    sheet.setColumnWidth(col, 150);
+    col++;
+  }
+  if (!has('end')) {
+    sheet.getRange(1, col).setValue('Ends (optional)')
+      .setFontWeight('bold').setBackground('#021f3d').setFontColor('white');
+    sheet.setColumnWidth(col, 150);
+  }
+  Logger.log('Starts/Ends columns ready on the Clinic Schedule tab.');
 }
 
 function setupMissingRollTriggers() {
