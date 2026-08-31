@@ -123,7 +123,7 @@ function doPost(e) {
 
     // coaches may be strings (legacy/No Staffing) or { name, hours } objects
     const coachesStr = coaches.map(c =>
-      typeof c === 'string' ? c : `${c.name} (${c.hours}h)`
+      typeof c === 'string' ? sanitizeCoachName(c) : `${sanitizeCoachName(c.name)} (${c.hours}h)`
     ).join(', ');
 
     // "Add Staffing Only" — adding a coach to a roll already submitted for
@@ -149,7 +149,8 @@ function doPost(e) {
     if (sessionHasRows && sessionFirstRow !== -1) {
       const toAdd = coaches
         .filter(c => typeof c !== 'string' && c.name && c.name !== 'No Staffing')
-        .filter(c => !existingCoachNames[c.name.toLowerCase()]);
+        .map(c => ({ name: sanitizeCoachName(c.name), hours: c.hours }))
+        .filter(c => c.name && !existingCoachNames[c.name.toLowerCase()]);
       if (toAdd.length > 0) {
         const cell = sheet.getRange(sessionFirstRow, 3);
         const current = (cell.getValue() || '').toString().trim();
@@ -238,7 +239,7 @@ function doGet(e) {
       .setMimeType(ContentService.MimeType.JSON);
   }
   return ContentService
-    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'schedule-windows-v2' }))
+    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'coach-name-guard-v1' }))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -332,7 +333,7 @@ function addNewCoachesToRoster(newCoaches) {
 
     let addedCount = 0;
     for (const coach of newCoaches) {
-      const name = (coach || '').trim();
+      const name = sanitizeCoachName(coach);
       if (!name) continue;
 
       if (!existingNames.has(name.toLowerCase())) {
@@ -465,6 +466,19 @@ function getClinicSessionDurations() {
  * Handles new format "J.C. (1h), Joey (0.5h)" and legacy "J.C., Joey".
  * defaultHours is used for legacy entries without an explicit hours value.
  */
+// Coach names live in one comma-separated cell, so a comma inside a name
+// would split it into bogus coaches. Convert "Last, First" to "First Last"
+// and drop stray commas. Mirrors normalizeCoachName() in the app, so an
+// older cached app version can't corrupt the sheet.
+function sanitizeCoachName(raw) {
+  let name = (raw || '').toString().trim().replace(/\s+/g, ' ');
+  if (name.indexOf(',') !== -1) {
+    const parts = name.split(',').map(s => s.trim()).filter(String);
+    name = (parts.length === 2) ? parts[1] + ' ' + parts[0] : parts.join(' ');
+  }
+  return name.replace(/,/g, '').replace(/\s+/g, ' ').trim();
+}
+
 function parseCoachEntries(coachesStr, defaultHours) {
   return coachesStr.split(',').map(entry => {
     entry = entry.trim();

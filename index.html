@@ -799,7 +799,7 @@
             <div id="coaches-section">
                 <div id="coaches-list" class="checklist"></div>
                 <div class="add-player-bar">
-                    <input type="text" id="add-coach-input" class="add-player-input" placeholder="Coach name (e.g. John)">
+                    <input type="text" id="add-coach-input" class="add-player-input" placeholder="Coach name (e.g. John Smith)">
                     <button class="add-player-btn" onclick="addCoach()">+ Add</button>
                 </div>
             </div>
@@ -1242,6 +1242,19 @@
         });
 
         // ==================== COACHES ====================
+        // Coach names are stored comma-separated in one cell, so a comma
+        // inside a name splits it into bogus coaches ("Armstron, Nolan"
+        // became two $0 coaches). Convert "Last, First" to "First Last"
+        // and strip any stray commas.
+        function normalizeCoachName(raw) {
+            let name = (raw || '').trim().replace(/\s+/g, ' ');
+            if (name.indexOf(',') !== -1) {
+                const parts = name.split(',').map(s => s.trim()).filter(Boolean);
+                name = (parts.length === 2) ? parts[1] + ' ' + parts[0] : parts.join(' ');
+            }
+            return name.replace(/,/g, '').replace(/\s+/g, ' ').trim();
+        }
+
         function renderCoaches() {
             const container = document.getElementById('coaches-list');
             container.innerHTML = '';
@@ -1368,8 +1381,15 @@
 
         function addCoach() {
             const input = document.getElementById('add-coach-input');
-            const name = input.value.trim();
+            const raw = input.value.trim();
+            if (!raw) return;
+
+            const name = normalizeCoachName(raw);
             if (!name) return;
+            if (name !== raw) {
+                showError(`Saved as "${name}" — coach names can't contain commas.`);
+                setTimeout(hideError, 5000);
+            }
 
             const container = document.getElementById('coaches-list');
             const fullHours = selectedClinic.hours || 1;
