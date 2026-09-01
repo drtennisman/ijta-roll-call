@@ -26,7 +26,11 @@ const ROSTER_SHEET_ID = '10nb7o9ZJ-fRyTnA2wosGa6OBCTZeEcGAKRAuCY7PZ8E';
 // something like "IJTA Billing Archive", then paste its ID here — it's the
 // long string in that sheet's URL between /d/ and /edit. Leave blank until
 // you've made one; archiving simply refuses to run without it.
-const ARCHIVE_SHEET_ID = '';
+const ARCHIVE_SHEET_ID = '1xoU6HgaYjgvcRQZtz6rpsL2E4A-I6X-moK6_gz60hW4';
+
+// The clinic sign-up Form response sheet — source for parent contact info.
+// One row per family: parent name/email/phone plus up to four children.
+const SIGNUP_SHEET_ID = '1DszkseXqMekH_erFHVEVELcKRI6UgPLexSZ9YtLYqBc';
 
 // Missing-roll reminders: don't flag/alert on anything before this date
 // (the schedule changed for summer, so older "gaps" aren't real misses).
@@ -246,7 +250,7 @@ function doGet(e) {
       .setMimeType(ContentService.MimeType.JSON);
   }
   return ContentService
-    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'archive-reports-v1' }))
+    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'contacts-sync-v1' }))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -807,6 +811,233 @@ function menuUpdateFamilies() {
 }
 
 // ============================================================
+// PLAYER CONTACTS
+// ============================================================
+// A "Contacts" tab in the ROSTER spreadsheet holds one row per player:
+//   Player (Last, First) | Parent | Phone | Email
+// Player names self-fill from the clinic rosters (like the Families tab),
+// so every kid gets a row and missing contacts are visible at a glance.
+// Billing tabs then show Parent and Phone beside each player, so the shop
+// manager can charge and call from one place.
+// ============================================================
+
+function getPlayerContacts() {
+  const sheet = SpreadsheetApp.openById(ROSTER_SHEET_ID).getSheetByName('Contacts');
+  if (!sheet) return {};
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) return {};
+
+  const h = data[0].map(v => (v || '').toString().toLowerCase());
+  const find = (word) => h.findIndex(x => x.indexOf(word) !== -1);
+  const pCol = 0;
+  const parentCol = find('parent');
+  const phoneCol = find('phone');
+  const emailCol = find('email');
+
+  const map = {};
+  for (let i = 1; i < data.length; i++) {
+    const name = (data[i][pCol] || '').toString().trim();
+    if (!name) continue;
+    map[name.toLowerCase()] = {
+      parent: parentCol >= 0 ? (data[i][parentCol] || '').toString().trim() : '',
+      phone: phoneCol >= 0 ? (data[i][phoneCol] || '').toString().trim() : '',
+      email: emailCol >= 0 ? (data[i][emailCol] || '').toString().trim() : ''
+    };
+  }
+  return map;
+}
+
+// Appends a row for every player on a clinic roster who isn't listed yet.
+// Never touches existing rows. Returns how many were added.
+function updateContactsList() {
+  const ss = SpreadsheetApp.openById(ROSTER_SHEET_ID);
+  let sheet = ss.getSheetByName('Contacts');
+  if (!sheet) {
+    sheet = ss.insertSheet('Contacts');
+    sheet.appendRow(['Player (Last, First)', 'Parent', 'Phone', 'Email', 'Source']);
+    sheet.getRange(1, 1, 1, 5).setFontWeight('bold').setBackground('#021f3d').setFontColor('white');
+    sheet.setColumnWidth(1, 220);
+    sheet.setColumnWidth(2, 200);
+    sheet.setColumnWidth(3, 150);
+    sheet.setColumnWidth(4, 240);
+    sheet.setColumnWidth(5, 190);
+    sheet.setFrozenRows(1);
+  }
+
+  const existing = {};
+  const data = sheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    const n = (data[i][0] || '').toString().trim().toLowerCase();
+    if (n) existing[n] = true;
+  }
+
+  const seen = {};
+  const toAdd = [];
+  for (const tab of CLINIC_ROSTER_TABS) {
+    const rs = ss.getSheetByName(tab);
+    if (!rs) continue;
+    const rd = rs.getDataRange().getValues();
+    for (let i = 1; i < rd.length; i++) {
+      const last = (rd[i][0] || '').toString().trim();
+      const first = (rd[i][1] || '').toString().trim();
+      if (!last && !first) continue;
+      const display = first ? last + ', ' + first : last;
+      const key = display.toLowerCase();
+      if (existing[key] || seen[key]) continue;
+      seen[key] = true;
+      toAdd.push([display, '', '', '', '']);
+    }
+  }
+
+  if (toAdd.length > 0) {
+    toAdd.sort((a, b) => a[0].localeCompare(b[0]));
+    sheet.getRange(sheet.getLastRow() + 1, 1, toAdd.length, 5).setValues(toAdd);
+  }
+  Logger.log('Contacts list updated: ' + toAdd.length + ' player(s) added.');
+  return toAdd.length;
+}
+
+function menuUpdateContacts() {
+  const added = updateContactsList();
+  const missing = countContactsMissing();
+  SpreadsheetApp.getUi().alert(
+    (added === 0 ? 'Contacts list is up to date — no new players.'
+                 : 'Added ' + added + ' player' + (added !== 1 ? 's' : '') + ' to the Contacts tab.') +
+    (missing > 0 ? '\n\n' + missing + ' player' + (missing !== 1 ? 's have' : ' has') +
+                   ' no phone number yet.' : ''));
+}
+
+// Reads the sign-up Form responses and fills BLANK contact fields on the
+// Contacts tab. Anything typed by hand is never overwritten.
+//
+// Matching runs in two tiers:
+//   1. Exact name — the child's name resolves to the roster's "Last, First"
+//   2. Unique surname — no exact match, but exactly one family in the
+//      sign-up sheet shares that surname (catches siblings whose own name
+//      was never entered). Marked in the Source column so it's reviewable.
+// A surname shared by two DIFFERENT families is left alone and reported,
+// rather than guessed at.
+function syncContactsFromSignup() {
+  if (!SIGNUP_SHEET_ID) throw new Error('SIGNUP_SHEET_ID is not set.');
+
+  updateContactsList();   // make sure every roster player has a row
+
+  const norm = (s) => (s || '').toString().toLowerCase().replace(/[^a-z ]/g, '').replace(/\s+/g, ' ').trim();
+  const su = SpreadsheetApp.openById(SIGNUP_SHEET_ID).getSheets()[0].getDataRange().getValues();
+  if (su.length < 2) return { filled: 0, bySurname: 0, ambiguous: [], missing: [] };
+
+  // Locate columns by header text (the Form's questions are long)
+  const head = su[0].map(v => (v || '').toString().toLowerCase());
+  let parentCol = -1, emailCol = -1, phoneCol = -1;
+  const childCols = [];
+  head.forEach((t, i) => {
+    if (parentCol === -1 && t.indexOf("parent's name") !== -1) parentCol = i;
+    if (emailCol === -1 && t.indexOf('best email') !== -1) emailCol = i;
+    if (phoneCol === -1 && t.indexOf('cell phone') !== -1) phoneCol = i;
+    if (/^child #\d+ name/.test(t)) childCols.push(i);
+  });
+  if (parentCol === -1 || childCols.length === 0) {
+    throw new Error('Could not find the parent/child columns on the sign-up sheet.');
+  }
+
+  const byFull = {}, bySurname = {};
+  for (let i = 1; i < su.length; i++) {
+    const parent = (su[i][parentCol] || '').toString().trim();
+    if (!parent || /^test/i.test(parent)) continue;
+    const email = emailCol >= 0 ? (su[i][emailCol] || '').toString().trim() : '';
+    const phone = phoneCol >= 0 ? (su[i][phoneCol] || '').toString().trim() : '';
+    if (!phone && email.indexOf('@') === -1) continue;   // nothing useful
+    const rec = { parent: parent, phone: phone, email: email };
+    const parentLast = norm(parent).split(' ').pop();
+
+    for (const col of childCols) {
+      const raw = (su[i][col] || '').toString().trim();
+      if (!raw || /^(test|clinic)$/i.test(raw)) continue;
+      const p = norm(raw).split(' ').filter(String);
+      let surname = null;
+      if (p.length >= 2) {
+        surname = p[p.length - 1];
+        const k1 = surname + ' ' + p.slice(0, -1).join(' ');       // last word is surname
+        const k2 = p.slice(1).join(' ') + ' ' + p[0];              // first word is given name
+        if (!byFull[k1]) byFull[k1] = rec;
+        if (!byFull[k2]) byFull[k2] = rec;
+      } else if (parentLast) {
+        surname = parentLast;                                       // bare first name
+        const k = parentLast + ' ' + p[0];
+        if (!byFull[k]) byFull[k] = rec;
+      }
+      if (surname) (bySurname[surname] = bySurname[surname] || []).push(rec);
+    }
+  }
+
+  // Fill blanks on the Contacts tab
+  const sheet = SpreadsheetApp.openById(ROSTER_SHEET_ID).getSheetByName('Contacts');
+  const data = sheet.getDataRange().getValues();
+  const ambiguous = [], missing = [];
+  let filled = 0, viaSurname = 0;
+
+  for (let i = 1; i < data.length; i++) {
+    const name = (data[i][0] || '').toString().trim();
+    if (!name) continue;
+    const hasParent = (data[i][1] || '').toString().trim();
+    const hasPhone = (data[i][2] || '').toString().trim();
+    const hasEmail = (data[i][3] || '').toString().trim();
+    if (hasParent && hasPhone && hasEmail) continue;   // already complete
+
+    const parts = name.split(',');
+    const key = norm((parts[0] || '') + ' ' + (parts[1] || ''));
+    let rec = byFull[key], source = 'sign-up';
+
+    if (!rec) {
+      const fam = bySurname[norm(parts[0])];
+      if (fam && fam.length) {
+        const uniq = {};
+        fam.forEach(f => { uniq[f.parent + '|' + f.phone] = f; });
+        const keys = Object.keys(uniq);
+        if (keys.length === 1) { rec = uniq[keys[0]]; source = 'sign-up (surname match)'; viaSurname++; }
+        else { ambiguous.push(name); continue; }
+      }
+    }
+    if (!rec) { missing.push(name); continue; }
+
+    // Only ever fill blanks — never overwrite what someone typed
+    let touched = false;
+    if (!hasParent && rec.parent) { sheet.getRange(i + 1, 2).setValue(rec.parent); touched = true; }
+    if (!hasPhone && rec.phone) { sheet.getRange(i + 1, 3).setValue(rec.phone); touched = true; }
+    if (!hasEmail && rec.email && rec.email.indexOf('@') !== -1) { sheet.getRange(i + 1, 4).setValue(rec.email); touched = true; }
+    if (touched) { sheet.getRange(i + 1, 5).setValue(source); filled++; }
+  }
+
+  Logger.log('Contacts sync: filled ' + filled + ' (' + viaSurname + ' by surname), ' +
+    ambiguous.length + ' ambiguous, ' + missing.length + ' with no record.');
+  return { filled: filled, bySurname: viaSurname, ambiguous: ambiguous, missing: missing };
+}
+
+function menuSyncContacts() {
+  const ui = SpreadsheetApp.getUi();
+  const r = syncContactsFromSignup();
+  let msg = 'Filled contact details for ' + r.filled + ' player' + (r.filled !== 1 ? 's' : '') +
+    (r.bySurname > 0 ? ' (' + r.bySurname + ' matched by surname — check the Source column)' : '') + '.\n\n' +
+    'Existing entries were left untouched.';
+  if (r.ambiguous.length) {
+    msg += '\n\nSame surname as more than one family — set these by hand:\n' +
+      r.ambiguous.slice(0, 10).join(', ') + (r.ambiguous.length > 10 ? ', …' : '');
+  }
+  if (r.missing.length) {
+    msg += '\n\nNo record in the sign-up sheet (' + r.missing.length + '):\n' +
+      r.missing.slice(0, 15).join(', ') + (r.missing.length > 15 ? ', …' : '');
+  }
+  ui.alert(msg);
+}
+
+function countContactsMissing() {
+  const contacts = getPlayerContacts();
+  let n = 0;
+  for (const k in contacts) if (!contacts[k].phone) n++;
+  return n;
+}
+
+// ============================================================
 // MONTHLY BILLING REPORT
 // ============================================================
 // Generates a billing summary in a separate Google Sheet.
@@ -950,7 +1181,7 @@ function generateMonthlyBilling(monthOverride, yearOverride) {
     sheet = billingSS.insertSheet(tabName);
 
     // Header
-    const headers = ['Player Name', 'Status', 'Sessions', 'Total', 'Sibling Discount',
+    const headers = ['Player Name', 'Parent', 'Phone', 'Status', 'Sessions', 'Total', 'Sibling Discount',
       'Final Charge', 'Charged?', 'Charged On', 'Outreach', 'Last Contact', 'Note'];
     sheet.appendRow(headers);
     const headerRange = sheet.getRange(1, 1, 1, headers.length);
@@ -959,10 +1190,14 @@ function generateMonthlyBilling(monthOverride, yearOverride) {
     headerRange.setFontColor('white');
 
     // Data rows (restoring any charged ticks / outreach captured above)
+    const contacts = getPlayerContacts();
     for (const row of billingRows) {
       const prev = prevState[row.name.toLowerCase()] || {};
+      const c = contacts[row.name.toLowerCase()] || {};
       sheet.appendRow([
         row.name,
+        c.parent || '',
+        c.phone || '',
         row.status,
         row.sessions,
         row.total,
@@ -978,13 +1213,15 @@ function generateMonthlyBilling(monthOverride, yearOverride) {
 
     // Checkboxes, outreach dropdown, formats, and sibling highlights
     if (billingRows.length > 0) {
-      sheet.getRange(2, 7, billingRows.length, 1).insertCheckboxes();
-      sheet.getRange(2, 4, billingRows.length, 3).setNumberFormat('$#,##0.00');
-      sheet.getRange(2, 8, billingRows.length, 1).setNumberFormat('M/d/yyyy');
-      sheet.getRange(2, 10, billingRows.length, 1).setNumberFormat('M/d/yyyy');
+      const col = (name) => headers.indexOf(name) + 1;
+      sheet.getRange(2, col('Charged?'), billingRows.length, 1).insertCheckboxes();
+      sheet.getRange(2, col('Total'), billingRows.length, 3).setNumberFormat('$#,##0.00');
+      sheet.getRange(2, col('Charged On'), billingRows.length, 1).setNumberFormat('M/d/yyyy');
+      sheet.getRange(2, col('Last Contact'), billingRows.length, 1).setNumberFormat('M/d/yyyy');
+      sheet.getRange(2, col('Phone'), billingRows.length, 1).setNumberFormat('@');  // keep leading zeros
       const outreachRule = SpreadsheetApp.newDataValidation()
         .requireValueInList(OUTREACH_LEVELS, true).build();
-      sheet.getRange(2, 9, billingRows.length, 1).setDataValidation(outreachRule);
+      sheet.getRange(2, col('Outreach'), billingRows.length, 1).setDataValidation(outreachRule);
       for (let i = 0; i < billingRows.length; i++) {
         if (billingRows[i].isSibling) {
           sheet.getRange(i + 2, 1, 1, headers.length).setBackground('#fff9c4');
@@ -993,17 +1230,8 @@ function generateMonthlyBilling(monthOverride, yearOverride) {
     }
 
     // Column widths
-    sheet.setColumnWidth(1, 200);
-    sheet.setColumnWidth(2, 80);
-    sheet.setColumnWidth(3, 80);
-    sheet.setColumnWidth(4, 100);
-    sheet.setColumnWidth(5, 130);
-    sheet.setColumnWidth(6, 110);
-    sheet.setColumnWidth(7, 90);
-    sheet.setColumnWidth(8, 110);
-    sheet.setColumnWidth(9, 130);
-    sheet.setColumnWidth(10, 110);
-    sheet.setColumnWidth(11, 220);
+    const widths = [200, 170, 130, 80, 80, 100, 130, 110, 90, 110, 130, 110, 220];
+    widths.forEach((w, i) => sheet.setColumnWidth(i + 1, w));
     sheet.setFrozenRows(1);
 
     // Summary at bottom
@@ -1153,7 +1381,10 @@ function sendUnchargedBillingDigest() {
     const finalCol = headers.indexOf('Final Charge');
     const outreachCol = headers.indexOf('Outreach');
     const lastContactCol = headers.indexOf('Last Contact');
-    if (chargedCol === -1 || finalCol === -1) continue; // old-format tab
+    const sessionsCol = headers.indexOf('Sessions');
+    const parentCol = headers.indexOf('Parent');
+    const phoneCol = headers.indexOf('Phone');
+    if (chargedCol === -1 || finalCol === -1 || sessionsCol === -1) continue; // old-format tab
 
     // Aged = more than BILLING_AGING_DAYS past the end of the billing month
     let aged = false;
@@ -1167,7 +1398,7 @@ function sendUnchargedBillingDigest() {
 
     for (let i = 1; i < data.length; i++) {
       // Player rows have a numeric Sessions value; summary rows don't
-      if (typeof data[i][2] !== 'number') continue;
+      if (typeof data[i][sessionsCol] !== 'number') continue;
       const player = (data[i][0] || '').toString().trim();
       if (!player) continue;
       if (data[i][chargedCol] === true) continue;
@@ -1184,7 +1415,9 @@ function sendUnchargedBillingDigest() {
         aged: aged,
         outreach: outreach,
         lastContact: lastContact,
-        escalate: escalate
+        escalate: escalate,
+        parent: parentCol !== -1 ? (data[i][parentCol] || '').toString().trim() : '',
+        phone: phoneCol !== -1 ? (data[i][phoneCol] || '').toString().trim() : ''
       });
       if (escalate) escalations.push({ player: player, label: label, amount: Number(data[i][finalCol]) || 0, outreach: outreach });
       if (!outreach) notContacted++;
@@ -1227,6 +1460,10 @@ function sendUnchargedBillingDigest() {
     html += '<p style="margin-bottom:2px;"><strong>' + label + '</strong></p><ul style="margin-top:2px;">';
     for (const item of groups[label]) {
       let line = '<li>' + item.player + ' &mdash; $' + item.amount.toFixed(2);
+      if (item.parent || item.phone) {
+        line += ' &mdash; ' + (item.parent || '') +
+          (item.phone ? ' <a href="sms:' + item.phone.replace(/[^0-9+]/g, '') + '">' + item.phone + '</a>' : '');
+      }
       if (item.outreach) {
         const when = fmtDate(item.lastContact);
         line += ' &mdash; <em>' + item.outreach + (when ? ' on ' + when : '') + '</em>';
@@ -2094,9 +2331,10 @@ function countUnchargedOn(sheets) {
     const data = sheet.getDataRange().getValues();
     if (data.length < 2) continue;
     const chargedCol = data[0].indexOf('Charged?');
-    if (chargedCol === -1) continue;
+    const sessionsCol = data[0].indexOf('Sessions');
+    if (chargedCol === -1 || sessionsCol === -1) continue;
     for (let i = 1; i < data.length; i++) {
-      if (typeof data[i][2] !== 'number') continue;   // skip summary rows
+      if (typeof data[i][sessionsCol] !== 'number') continue;   // skip summary rows
       if (!(data[i][0] || '').toString().trim()) continue;
       if (data[i][chargedCol] !== true) n++;
     }
@@ -2210,6 +2448,7 @@ function onOpen() {
     .addItem('Generate Last Month — A/S Summary Only', 'menuLastMonthAS')
     .addSeparator()
     .addItem('Update Families List', 'menuUpdateFamilies')
+    .addItem('Sync Contacts from Sign-Up Sheet', 'menuSyncContacts')
     .addItem('Send Uncharged Billing Digest Now', 'menuSendUnchargedDigest')
     .addSeparator()
     .addItem('Archive Old Reports', 'menuArchiveOldReports')
