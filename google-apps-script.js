@@ -250,7 +250,7 @@ function doGet(e) {
       .setMimeType(ContentService.MimeType.JSON);
   }
   return ContentService
-    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'contacts-sync-v1' }))
+    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'desktop-texting-v1' }))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -1419,7 +1419,11 @@ function sendUnchargedBillingDigest() {
         parent: parentCol !== -1 ? (data[i][parentCol] || '').toString().trim() : '',
         phone: phoneCol !== -1 ? (data[i][phoneCol] || '').toString().trim() : ''
       });
-      if (escalate) escalations.push({ player: player, label: label, amount: Number(data[i][finalCol]) || 0, outreach: outreach });
+      if (escalate) escalations.push({
+        player: player, label: label, amount: Number(data[i][finalCol]) || 0, outreach: outreach,
+        parent: parentCol !== -1 ? (data[i][parentCol] || '').toString().trim() : '',
+        phone: phoneCol !== -1 ? (data[i][phoneCol] || '').toString().trim() : ''
+      });
       if (!outreach) notContacted++;
       count++;
     }
@@ -1444,6 +1448,10 @@ function sendUnchargedBillingDigest() {
   html += '<p>' + count + ' player' + (count !== 1 ? 's have' : ' has') +
     ' <strong>not been marked as charged</strong>' +
     (notContacted > 0 ? ' &mdash; ' + notContacted + ' not yet contacted' : '') + '.</p>';
+  html += '<p><a href="https://voice.google.com/u/0/messages" ' +
+    'style="display:inline-block;background:#1a73e8;color:#fff;padding:9px 16px;' +
+    'border-radius:8px;text-decoration:none;font-weight:bold;">Open Google Voice</a> ' +
+    '<span style="color:#888;font-size:12px;">&nbsp;Double-click a number below to select it, then paste.</span></p>';
 
   // Escalation block first — these have exhausted normal follow-up
   if (escalations.length > 0) {
@@ -1451,7 +1459,14 @@ function sendUnchargedBillingDigest() {
     html += '<strong style="color:#c62828;">Needs escalation</strong><ul style="margin:6px 0 0 0;">';
     for (const e of escalations) {
       html += '<li>' + e.player + ' &mdash; $' + e.amount.toFixed(2) +
-        ' &mdash; <em>' + e.outreach + '</em> <span style="color:#888;">(' + e.label + ')</span></li>';
+        ' &mdash; <em>' + e.outreach + '</em>';
+      if (e.parent) html += ' &mdash; ' + e.parent;
+      if (e.phone) {
+        const d = e.phone.replace(/[^0-9]/g, '');
+        html += ' <span style="font-family:menlo,consolas,monospace;background:#fff;' +
+          'padding:2px 6px;border-radius:4px;">' + (d || e.phone) + '</span>';
+      }
+      html += ' <span style="color:#888;">(' + e.label + ')</span></li>';
     }
     html += '</ul></div>';
   }
@@ -1461,8 +1476,18 @@ function sendUnchargedBillingDigest() {
     for (const item of groups[label]) {
       let line = '<li>' + item.player + ' &mdash; $' + item.amount.toFixed(2);
       if (item.parent || item.phone) {
-        line += ' &mdash; ' + (item.parent || '') +
-          (item.phone ? ' <a href="sms:' + item.phone.replace(/[^0-9+]/g, '') + '">' + item.phone + '</a>' : '');
+        // Numbers are shown as bare digits in a monospace box: one
+        // double-click selects the whole number to paste into Google Voice.
+        // (An sms: link is useless here — it opens the desktop's default
+        // messaging app, never Google Voice.)
+        line += ' &mdash; ' + (item.parent || '');
+        if (item.phone) {
+          const digits = item.phone.replace(/[^0-9]/g, '');
+          line += ' <span style="font-family:menlo,consolas,monospace;background:#f1f3f4;' +
+            'padding:2px 6px;border-radius:4px;">' + (digits || item.phone) + '</span>';
+        }
+      } else {
+        line += ' &mdash; <span style="color:#c62828;">no contact on file</span>';
       }
       if (item.outreach) {
         const when = fmtDate(item.lastContact);
@@ -1476,7 +1501,7 @@ function sendUnchargedBillingDigest() {
     html += '</ul>';
   }
   html += '<p style="color:#666;font-size:13px;">On the billing sheet: tick <strong>Charged?</strong> once entered, ' +
-    'or set <strong>Outreach</strong> after each attempt to reach the family (the date fills in automatically).</p></div>';
+    'or set <strong>Outreach</strong> after each text to the family (the date fills in automatically).</p></div>';
 
   MailApp.sendEmail({ to: recipients.join(','), subject: subject, htmlBody: html });
   return count;
