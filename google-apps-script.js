@@ -21,6 +21,13 @@
 const ATTENDANCE_SHEET_ID = '1ipQEh5KCRywBOin8GM4xjzvGh9iK1YWp8VD9BXGH_YA';
 const ROSTER_SHEET_ID = '10nb7o9ZJ-fRyTnA2wosGa6OBCTZeEcGAKRAuCY7PZ8E';
 
+// Where old report tabs get moved by "Archive Old Reports" (see the
+// ARCHIVE section near the bottom). Create an empty Google Sheet named
+// something like "IJTA Billing Archive", then paste its ID here — it's the
+// long string in that sheet's URL between /d/ and /edit. Leave blank until
+// you've made one; archiving simply refuses to run without it.
+const ARCHIVE_SHEET_ID = '';
+
 // Missing-roll reminders: don't flag/alert on anything before this date
 // (the schedule changed for summer, so older "gaps" aren't real misses).
 const REMINDER_GO_LIVE = '2026-06-29';
@@ -239,7 +246,7 @@ function doGet(e) {
       .setMimeType(ContentService.MimeType.JSON);
   }
   return ContentService
-    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'coach-name-guard-v1' }))
+    .createTextOutput(JSON.stringify({ status: 'IJTA Roll Call API is running', version: 'archive-reports-v1' }))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -2027,6 +2034,160 @@ function generateLastMonthAllReports() {
 }
 
 // ============================================================
+// ARCHIVE OLD REPORT TABS
+// ============================================================
+// Every month adds ~13 tabs to the billing spreadsheet (a billing tab and
+// an A/S tab per clinic, plus the master summary). After a year that's
+// 150+ tabs and the sheet becomes slow or impossible to open — the data
+// stays fine, but the editor can't render it.
+//
+// This moves report tabs older than the months you're keeping into the
+// archive spreadsheet (ARCHIVE_SHEET_ID), then removes them from the live
+// one. Tabs are COPIED before being deleted, so the Charged? ticks and
+// outreach history are preserved rather than lost.
+//
+// SETUP: create an empty spreadsheet, paste its ID into ARCHIVE_SHEET_ID
+// at the top of this file. Then use IJTA Reports > Archive Old Reports.
+// ============================================================
+
+const MONTH_NAMES_FULL = ['January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December'];
+
+// Pulls the "August 2026" off the end of a report tab name.
+// Returns { month (1-12), year } or null if it isn't a dated report tab.
+function reportTabMonth(name) {
+  const m = (name || '').match(/([A-Za-z]+)\s+(\d{4})\s*$/);
+  if (!m) return null;
+  const idx = MONTH_NAMES_FULL.indexOf(m[1]);
+  if (idx === -1) return null;
+  // Only tabs that look like generated reports
+  if (name.indexOf(' - Billing - ') === -1 &&
+      name.indexOf(' - A/S Summary - ') === -1 &&
+      name.indexOf(' - Attendance - ') === -1 &&
+      name.indexOf('MASTER Summary - ') !== 0) return null;
+  return { month: idx + 1, year: parseInt(m[2], 10) };
+}
+
+// Which tabs are older than the retention window? monthsToKeep counts the
+// current month, so 3 in August keeps June, July, August.
+function findArchivableTabs(monthsToKeep) {
+  const keep = monthsToKeep || 3;
+  const now = new Date();
+  const cutoff = new Date(now.getFullYear(), now.getMonth() - (keep - 1), 1);
+
+  const ss = SpreadsheetApp.openById(BILLING_SHEET_ID);
+  const out = [];
+  for (const sheet of ss.getSheets()) {
+    const info = reportTabMonth(sheet.getName());
+    if (!info) continue;
+    if (new Date(info.year, info.month - 1, 1) < cutoff) out.push(sheet);
+  }
+  return out;
+}
+
+// Counts players still unticked on the tabs about to be archived, so we
+// never quietly move away money that hasn't been collected.
+function countUnchargedOn(sheets) {
+  let n = 0;
+  for (const sheet of sheets) {
+    if (sheet.getName().indexOf(' - Billing - ') === -1) continue;
+    const data = sheet.getDataRange().getValues();
+    if (data.length < 2) continue;
+    const chargedCol = data[0].indexOf('Charged?');
+    if (chargedCol === -1) continue;
+    for (let i = 1; i < data.length; i++) {
+      if (typeof data[i][2] !== 'number') continue;   // skip summary rows
+      if (!(data[i][0] || '').toString().trim()) continue;
+      if (data[i][chargedCol] !== true) n++;
+    }
+  }
+  return n;
+}
+
+// Copies each tab into the archive spreadsheet, then deletes it here.
+// Returns { moved, skipped, names }.
+function archiveOldReports(monthsToKeep) {
+  if (!ARCHIVE_SHEET_ID) {
+    throw new Error('No archive spreadsheet set. Create an empty Google Sheet, ' +
+      'then paste its ID into ARCHIVE_SHEET_ID at the top of this script.');
+  }
+  const archiveSS = SpreadsheetApp.openById(ARCHIVE_SHEET_ID);
+  const liveSS = SpreadsheetApp.openById(BILLING_SHEET_ID);
+  const existing = {};
+  archiveSS.getSheets().forEach(s => { existing[s.getName()] = true; });
+
+  const targets = findArchivableTabs(monthsToKeep);
+  const moved = [], skipped = [];
+
+  for (const sheet of targets) {
+    const name = sheet.getName();
+    try {
+      if (existing[name]) {
+        // Already archived (a previous run) — just remove the live copy
+        liveSS.deleteSheet(sheet);
+        moved.push(name);
+        continue;
+      }
+      const copy = sheet.copyTo(archiveSS);
+      copy.setName(name);
+      existing[name] = true;
+      liveSS.deleteSheet(sheet);
+      moved.push(name);
+    } catch (e) {
+      skipped.push(name + ' (' + e.message + ')');
+    }
+  }
+
+  // A brand-new spreadsheet starts with an empty "Sheet1" — clear it out
+  try {
+    if (moved.length > 0 && archiveSS.getSheets().length > 1) {
+      const blank = archiveSS.getSheetByName('Sheet1');
+      if (blank && blank.getLastRow() === 0) archiveSS.deleteSheet(blank);
+    }
+  } catch (e) { /* harmless */ }
+
+  Logger.log('Archived ' + moved.length + ' tab(s); skipped ' + skipped.length);
+  return { moved: moved.length, skipped: skipped.length, names: moved, errors: skipped };
+}
+
+function menuArchiveOldReports() {
+  const ui = SpreadsheetApp.getUi();
+  if (!ARCHIVE_SHEET_ID) {
+    ui.alert('Set up the archive first:\n\n' +
+      '1. Create an empty Google Sheet (name it "IJTA Billing Archive")\n' +
+      '2. Copy its ID from the URL — the long string between /d/ and /edit\n' +
+      '3. Paste it into ARCHIVE_SHEET_ID at the top of this script, and Save');
+    return;
+  }
+
+  const KEEP = 3;
+  const targets = findArchivableTabs(KEEP);
+  if (targets.length === 0) {
+    ui.alert('Nothing to archive — no report tabs older than the last ' + KEEP + ' months.');
+    return;
+  }
+
+  const uncharged = countUnchargedOn(targets);
+  let msg = 'Move ' + targets.length + ' report tab' + (targets.length !== 1 ? 's' : '') +
+    ' older than the last ' + KEEP + ' months into the archive spreadsheet?\n\n' +
+    'They are copied to the archive first, so nothing is lost — including ' +
+    'Charged? ticks and outreach history.\n\n';
+  if (uncharged > 0) {
+    msg += 'HEADS UP: ' + uncharged + ' player' + (uncharged !== 1 ? 's are' : ' is') +
+      ' still not marked as charged on those tabs. Archiving removes them from ' +
+      'the weekly uncharged digest.\n\n';
+  }
+  msg += 'Oldest: ' + targets[0].getName();
+
+  if (ui.alert('Archive Old Reports', msg, ui.ButtonSet.YES_NO) !== ui.Button.YES) return;
+
+  const result = archiveOldReports(KEEP);
+  ui.alert('Archived ' + result.moved + ' tab' + (result.moved !== 1 ? 's' : '') + '.' +
+    (result.skipped > 0 ? '\n\nSkipped ' + result.skipped + ':\n' + result.errors.join('\n') : '') +
+    '\n\nReload this spreadsheet — it should open much faster now.');
+}
+
+// ============================================================
 // CUSTOM SHEET MENU
 // ============================================================
 // Adds an "IJTA Reports" menu to the spreadsheet toolbar.
@@ -2050,6 +2211,8 @@ function onOpen() {
     .addSeparator()
     .addItem('Update Families List', 'menuUpdateFamilies')
     .addItem('Send Uncharged Billing Digest Now', 'menuSendUnchargedDigest')
+    .addSeparator()
+    .addItem('Archive Old Reports', 'menuArchiveOldReports')
     .addToUi();
 
   ui.createMenu('Roll Reminders')
