@@ -15,7 +15,7 @@
 // 8. Set "Who has access" to "Anyone"
 // 9. Click "Deploy"
 // 10. Authorize the script when prompted
-// 11. Copy the Web App URL — you'll need it for the app
+// 11. Copy the Web App URL - you'll need it for the app
 // ============================================================
 
 const ATTENDANCE_SHEET_ID = '1ipQEh5KCRywBOin8GM4xjzvGh9iK1YWp8VD9BXGH_YA';
@@ -23,16 +23,16 @@ const ROSTER_SHEET_ID = '10nb7o9ZJ-fRyTnA2wosGa6OBCTZeEcGAKRAuCY7PZ8E';
 
 // Where old report tabs get moved by "Archive Old Reports" (see the
 // ARCHIVE section near the bottom). Create an empty Google Sheet named
-// something like "IJTA Billing Archive", then paste its ID here — it's the
+// something like "IJTA Billing Archive", then paste its ID here - it's the
 // long string in that sheet's URL between /d/ and /edit. Leave blank until
 // you've made one; archiving simply refuses to run without it.
 const ARCHIVE_SHEET_ID = '1xoU6HgaYjgvcRQZtz6rpsL2E4A-I6X-moK6_gz60hW4';
 
-// The clinic sign-up Form response sheet — source for parent contact info.
+// The clinic sign-up Form response sheet - source for parent contact info.
 // One row per family: parent name/email/phone plus up to four children.
 const SIGNUP_SHEET_ID = '1DszkseXqMekH_erFHVEVELcKRI6UgPLexSZ9YtLYqBc';
 
-// The collections worklist — one row per FAMILY who still owes, with the
+// The collections worklist - one row per FAMILY who still owes, with the
 // contact details and follow-up history. This is the only sheet the shop
 // manager needs. Kept separate from the billing report on purpose: billing
 // is regenerated every month, while outreach notes are typed by hand and
@@ -42,7 +42,7 @@ const COLLECTIONS_SHEET_ID = '14s6nX2OXuH4cvzj575Ld4GT3JN2Na2aprIyEFkP8Dog';
 // Missing-roll reminders: don't flag/alert on anything before this date
 // (the schedule changed for summer, so older "gaps" aren't real misses).
 const REMINDER_GO_LIVE = '2026-06-29';
-// Live roll app URL — included in alert emails.
+// Live roll app URL - included in alert emails.
 const ROLL_APP_URL = 'https://drtennisman.github.io/ijta-roll-call/';
 
 /**
@@ -126,7 +126,7 @@ function doPost(e) {
       }
     }
 
-    // Clinic cancelled (rain-out / holiday) — record a single marker row.
+    // Clinic cancelled (rain-out / holiday) - record a single marker row.
     // This clears the missing-roll flag for the day; reports skip these rows.
     if (data.cancelled) {
       const reason = (data.cancelReason || 'Other').toString();
@@ -144,7 +144,7 @@ function doPost(e) {
       typeof c === 'string' ? sanitizeCoachName(c) : `${sanitizeCoachName(c.name)} (${c.hours}h)`
     ).join(', ');
 
-    // "Add Staffing Only" — adding a coach to a roll already submitted for
+    // "Add Staffing Only" - adding a coach to a roll already submitted for
     // this date, with no players to record. Refuse loudly if there's no
     // roll to attach them to, rather than accepting and losing the coach.
     if (data.staffingOnly && !sessionHasRows) {
@@ -161,7 +161,7 @@ function doPost(e) {
     // off a past roll): merge them into that session's coach cell. Without
     // this, a submission whose players are all duplicates would write no
     // rows at all and the coach would be silently lost.
-    // "No Staffing" is never merged into a session that already has rows —
+    // "No Staffing" is never merged into a session that already has rows -
     // it would just add a meaningless $0 line beside the real coaches.
     let coachesAddedToSession = [];
     if (sessionHasRows && sessionFirstRow !== -1) {
@@ -182,14 +182,14 @@ function doPost(e) {
     }
 
     // Players now come as objects: { name: "Last, First", status: "M"|"G" }
-    // Add one row per player — but only players NOT already logged for
+    // Add one row per player - but only players NOT already logged for
     // this clinic+date (duplicates from retries/re-takes are skipped).
     // Coaches only appear on the first row of each written batch.
     let recorded = 0;
     let duplicatesSkipped = 0;
     if (data.noAttendees) {
-      // No one showed up — record a single row noting that
-      // (skip if this session already has rows — that would contradict them)
+      // No one showed up - record a single row noting that
+      // (skip if this session already has rows - that would contradict them)
       if (!sessionHasRows) {
         sheet.appendRow([date, clinic, coachesStr, 'No Attendees', '']);
       }
@@ -534,7 +534,7 @@ function getAttendanceWithCoachesForMonth(billingMonth, billingYear) {
 
   if (sheetsToRead.length === 0) return { rows: [], sessionCoaches: {}, sessionMarkers: {} };
 
-  // Clinic session durations — used as the default hours for bare coach
+  // Clinic session durations - used as the default hours for bare coach
   // names (entries without an explicit "(Xh)" tag, e.g. legacy data).
   const sessionDurations = getClinicSessionDurations();
 
@@ -600,7 +600,7 @@ function getAttendanceWithCoachesForMonth(billingMonth, billingYear) {
 // "Families" tab in the roster spreadsheet is the source of truth:
 //   Players (Last, First; Last, First) | Siblings? (Yes/No) | Clinic (auto)
 // It auto-populates with every detected same-last-name group (Siblings? =
-// Yes). A "Yes" row IS the family — exactly its members; kids on a Yes row
+// Yes). A "Yes" row IS the family - exactly its members; kids on a Yes row
 // are exempt from last-name auto-matching, so you can trim an unrelated
 // same-name kid out of a family row and the edit sticks (the auto-fill
 // never re-adds a grouping that touches a kid already on the tab).
@@ -628,14 +628,14 @@ function getSiblingOverrides() {
     const answer = (data[i][1] || '').toString().trim().toLowerCase();
     const isNo = (answer === 'no' || answer === 'n' || answer === 'false');
     if (isNo) {
-      // Not siblings — break any auto-match between these names
+      // Not siblings - break any auto-match between these names
       for (let a = 0; a < names.length; a++) {
         for (let b = a + 1; b < names.length; b++) {
           result.notPairs[[names[a], names[b]].sort().join('|||')] = true;
         }
       }
     } else {
-      // A "Yes" row IS the family — exactly these members. Kids on a Yes
+      // A "Yes" row IS the family - exactly these members. Kids on a Yes
       // row are claimed: last-name auto-matching leaves them alone, so an
       // unrelated same-name kid (e.g. Lucy Davidson) can't get pulled in.
       result.families.push(names);
@@ -657,7 +657,7 @@ function applySiblingDiscounts(rows, overrides) {
   const lowerNames = rows.map(r => r.name.toLowerCase());
   const pairKey = (a, b) => [a, b].sort().join('|||');
 
-  // Same last name = same family — but only between kids NOT claimed by
+  // Same last name = same family - but only between kids NOT claimed by
   // an explicit "Yes" family row, and not vetoed by a "No" row
   for (let i = 0; i < n; i++) {
     for (let j = i + 1; j < n; j++) {
@@ -707,7 +707,7 @@ function applySiblingDiscounts(rows, overrides) {
 
 // Builds discounted billing rows for one clinic from raw player data.
 // players: [{ name, status ('M'|'G'|'S'), sessions }]
-// Returns { rows, gross, totalDiscount, net } — rows sorted by name.
+// Returns { rows, gross, totalDiscount, net } - rows sorted by name.
 function buildClinicBillingRows(clinic, players, overrides) {
   const rows = [];
   for (const p of players) {
@@ -729,7 +729,7 @@ function buildClinicBillingRows(clinic, players, overrides) {
 
 // Self-fills the "Families" tab: scans every clinic roster, finds groups
 // of 2+ players sharing a last name, and APPENDS any not already listed
-// (Siblings? = "Yes"). Existing rows — and your Yes/No answers — are never
+// (Siblings? = "Yes"). Existing rows - and your Yes/No answers - are never
 // touched. Runs automatically at billing time and on demand from the menu.
 // Returns the number of new families added.
 function updateFamiliesList() {
@@ -746,7 +746,7 @@ function updateFamiliesList() {
   }
 
   // Existing entries, keyed by the sorted lowercase set of names.
-  // Also track every kid mentioned anywhere on the tab — groups touching
+  // Also track every kid mentioned anywhere on the tab - groups touching
   // them are never re-added, so human edits stay as the human left them.
   const data = sheet.getDataRange().getValues();
   const existing = {};
@@ -785,7 +785,7 @@ function updateFamiliesList() {
     }
   }
 
-  // Append only genuinely new families — and never a grouping that
+  // Append only genuinely new families - and never a grouping that
   // includes a kid already listed on the tab (e.g. after J.C. trims an
   // unrelated same-name kid out of a family, that edit is permanent)
   let added = 0;
@@ -812,7 +812,7 @@ function updateFamiliesList() {
 function menuUpdateFamilies() {
   const added = updateFamiliesList();
   SpreadsheetApp.getUi().alert(added === 0
-    ? 'Families list is up to date — no new families found.'
+    ? 'Families list is up to date - no new families found.'
     : 'Added ' + added + ' new famil' + (added === 1 ? 'y' : 'ies') +
       ' to the Families tab (set to "Yes"). Review and flip any to "No" if they are not actually siblings.');
 }
@@ -908,7 +908,7 @@ function menuUpdateContacts() {
   const added = updateContactsList();
   const missing = countContactsMissing();
   SpreadsheetApp.getUi().alert(
-    (added === 0 ? 'Contacts list is up to date — no new players.'
+    (added === 0 ? 'Contacts list is up to date - no new players.'
                  : 'Added ' + added + ' player' + (added !== 1 ? 's' : '') + ' to the Contacts tab.') +
     (missing > 0 ? '\n\n' + missing + ' player' + (missing !== 1 ? 's have' : ' has') +
                    ' no phone number yet.' : ''));
@@ -918,8 +918,8 @@ function menuUpdateContacts() {
 // Contacts tab. Anything typed by hand is never overwritten.
 //
 // Matching runs in two tiers:
-//   1. Exact name — the child's name resolves to the roster's "Last, First"
-//   2. Unique surname — no exact match, but exactly one family in the
+//   1. Exact name - the child's name resolves to the roster's "Last, First"
+//   2. Unique surname - no exact match, but exactly one family in the
 //      sign-up sheet shares that surname (catches siblings whose own name
 //      was never entered). Marked in the Source column so it's reviewable.
 // A surname shared by two DIFFERENT families is left alone and reported,
@@ -1007,7 +1007,7 @@ function syncContactsFromSignup() {
     }
     if (!rec) { missing.push(name); continue; }
 
-    // Only ever fill blanks — never overwrite what someone typed
+    // Only ever fill blanks - never overwrite what someone typed
     let touched = false;
     if (!hasParent && rec.parent) { sheet.getRange(i + 1, 2).setValue(rec.parent); touched = true; }
     if (!hasPhone && rec.phone) { sheet.getRange(i + 1, 3).setValue(rec.phone); touched = true; }
@@ -1024,15 +1024,15 @@ function menuSyncContacts() {
   const ui = SpreadsheetApp.getUi();
   const r = syncContactsFromSignup();
   let msg = 'Filled contact details for ' + r.filled + ' player' + (r.filled !== 1 ? 's' : '') +
-    (r.bySurname > 0 ? ' (' + r.bySurname + ' matched by surname — check the Source column)' : '') + '.\n\n' +
+    (r.bySurname > 0 ? ' (' + r.bySurname + ' matched by surname - check the Source column)' : '') + '.\n\n' +
     'Existing entries were left untouched.';
   if (r.ambiguous.length) {
-    msg += '\n\nSame surname as more than one family — set these by hand:\n' +
-      r.ambiguous.slice(0, 10).join(', ') + (r.ambiguous.length > 10 ? ', …' : '');
+    msg += '\n\nSame surname as more than one family - set these by hand:\n' +
+      r.ambiguous.slice(0, 10).join(', ') + (r.ambiguous.length > 10 ? ', ...' : '');
   }
   if (r.missing.length) {
     msg += '\n\nNo record in the sign-up sheet (' + r.missing.length + '):\n' +
-      r.missing.slice(0, 15).join(', ') + (r.missing.length > 15 ? ', …' : '');
+      r.missing.slice(0, 15).join(', ') + (r.missing.length > 15 ? ', ...' : '');
   }
   ui.alert(msg);
 }
@@ -1052,7 +1052,7 @@ function countContactsMissing() {
 // or set up a monthly trigger (Edit > Triggers).
 // ============================================================
 
-// Pricing lookup tables — total charged for N sessions
+// Pricing lookup tables - total charged for N sessions
 // Taken directly from the pricing spreadsheet
 const PRICING = {
   'Red Ball': {
@@ -1102,7 +1102,7 @@ function getTotalCharge(clinic, status, sessions) {
   if (sessions <= 0) return 0;
   if (sessions < lookup.length) return lookup[sessions];
 
-  // Beyond the table — use last table value + extra sessions at per-session rate
+  // Beyond the table - use last table value + extra sessions at per-session rate
   const lastIndex = lookup.length - 1;
   const extraSessions = sessions - lastIndex;
   return lookup[lastIndex] + (extraSessions * rate[s]);
@@ -1126,7 +1126,7 @@ function generateMonthlyBilling(monthOverride, yearOverride) {
   const clinicData = {}; // { clinic: { playerKey: { name, status, sessions } } }
 
   // A clinic meets at most once per day, so each kid counts at most one
-  // session per clinic per day — neutralizes any duplicate rows.
+  // session per clinic per day - neutralizes any duplicate rows.
   const seenSession = {};
   for (const row of attendanceRows) {
     const dayKey = row.clinic + '|||' + row.playerName.toString().trim().toLowerCase() + '|||' +
@@ -1385,7 +1385,7 @@ function refreshCollections(monthsBack) {
       added++;
     }
   }
-  // Anyone previously listed who no longer owes is marked Paid, not deleted —
+  // Anyone previously listed who no longer owes is marked Paid, not deleted -
   // the outreach history stays visible.
   for (let i = 1; i < existing.length; i++) {
     const k = (existing[i][0] || '').toString().trim().toLowerCase();
@@ -1434,7 +1434,7 @@ function setupCollections() {
   }
   ScriptApp.newTrigger('onCollectionsEdit').forSpreadsheet(COLLECTIONS_SHEET_ID).onEdit().create();
   refreshCollections();
-  Logger.log('Collections ready — Last Contact will stamp itself when Outreach is set.');
+  Logger.log('Collections ready - Last Contact will stamp itself when Outreach is set.');
 }
 
 // Outreach dropdown options, in escalation order. The last two mark a
@@ -1467,7 +1467,7 @@ function onBillingEdit(e) {
     if (!chargedCol || !chargedOnCol) return;
     if (e.range.getColumn() !== chargedCol) return;
 
-    // Outreach lives on the Collections sheet now — see onCollectionsEdit.
+    // Outreach lives on the Collections sheet now - see onCollectionsEdit.
     const startRow = e.range.getRow();
     for (let r = 0; r < e.range.getNumRows(); r++) {
       const row = startRow + r;
@@ -1482,7 +1482,7 @@ function onBillingEdit(e) {
   }
 }
 
-// Refreshes the Collections sheet, then emails what's outstanding — one
+// Refreshes the Collections sheet, then emails what's outstanding - one
 // entry per family, with the phone number ready to paste into Google Voice
 // and the follow-up history so far. Sends nothing when everyone has paid.
 // Returns the number of families still owing.
@@ -1683,7 +1683,7 @@ function generateAttendanceSummary(monthOverride, yearOverride) {
     clinicSheet = billingSS.insertSheet(tabName);
 
     // Title
-    clinicSheet.getRange(1, 1).setValue(clinic + ' — Attendance Summary — ' + monthName);
+    clinicSheet.getRange(1, 1).setValue(clinic + ' - Attendance Summary - ' + monthName);
     clinicSheet.getRange(1, 1).setFontWeight('bold');
     clinicSheet.getRange(1, 1).setFontSize(12);
 
@@ -1839,7 +1839,7 @@ function generateAttendanceAndStaffingSummary(monthOverride, yearOverride) {
   }
 
   // Fold in no-attendee / cancelled dates so they appear in the session
-  // diary (zero players, zero dollars — informational only)
+  // diary (zero players, zero dollars - informational only)
   for (const key in sessionMarkers) {
     const sep = key.indexOf('|||');
     const dateStr = key.substring(0, sep);
@@ -2209,7 +2209,7 @@ function generateMasterASSummary(monthOverride, yearOverride) {
   if (sheet) ss.deleteSheet(sheet);
   sheet = ss.insertSheet(tabName, 0);  // keep it as the first tab
 
-  sheet.getRange(1, 1).setValue('IJTA — All Clinics Summary — ' + monthName)
+  sheet.getRange(1, 1).setValue('IJTA - All Clinics Summary - ' + monthName)
     .setFontWeight('bold').setFontSize(14);
   sheet.getRange(2, 1).setValue('Revenue net of sibling discounts, minus staffing cost.')
     .setFontColor('#666666').setFontStyle('italic');
@@ -2237,7 +2237,7 @@ function generateMasterASSummary(monthOverride, yearOverride) {
   // Grand total
   const totalRow = firstDataRow + dataCount;
   sheet.getRange(totalRow, 1, 1, headers.length).setValues([[
-    'TOTAL — ALL CLINICS', gSessions, '', gCheckIns,
+    'TOTAL - ALL CLINICS', gSessions, '', gCheckIns,
     gGross, gDiscount > 0 ? -gDiscount : 0, gNet, -gStaffing, gNet - gStaffing
   ]]);
   sheet.getRange(totalRow, 1, 1, headers.length)
@@ -2376,7 +2376,7 @@ function generateLastMonthAllReports() {
 // ============================================================
 // Every month adds ~13 tabs to the billing spreadsheet (a billing tab and
 // an A/S tab per clinic, plus the master summary). After a year that's
-// 150+ tabs and the sheet becomes slow or impossible to open — the data
+// 150+ tabs and the sheet becomes slow or impossible to open - the data
 // stays fine, but the editor can't render it.
 //
 // This moves report tabs older than the months you're keeping into the
@@ -2462,7 +2462,7 @@ function archiveOldReports(monthsToKeep) {
     const name = sheet.getName();
     try {
       if (existing[name]) {
-        // Already archived (a previous run) — just remove the live copy
+        // Already archived (a previous run) - just remove the live copy
         liveSS.deleteSheet(sheet);
         moved.push(name);
         continue;
@@ -2477,7 +2477,7 @@ function archiveOldReports(monthsToKeep) {
     }
   }
 
-  // A brand-new spreadsheet starts with an empty "Sheet1" — clear it out
+  // A brand-new spreadsheet starts with an empty "Sheet1" - clear it out
   try {
     if (moved.length > 0 && archiveSS.getSheets().length > 1) {
       const blank = archiveSS.getSheetByName('Sheet1');
@@ -2494,7 +2494,7 @@ function menuArchiveOldReports() {
   if (!ARCHIVE_SHEET_ID) {
     ui.alert('Set up the archive first:\n\n' +
       '1. Create an empty Google Sheet (name it "IJTA Billing Archive")\n' +
-      '2. Copy its ID from the URL — the long string between /d/ and /edit\n' +
+      '2. Copy its ID from the URL - the long string between /d/ and /edit\n' +
       '3. Paste it into ARCHIVE_SHEET_ID at the top of this script, and Save');
     return;
   }
@@ -2502,14 +2502,14 @@ function menuArchiveOldReports() {
   const KEEP = 3;
   const targets = findArchivableTabs(KEEP);
   if (targets.length === 0) {
-    ui.alert('Nothing to archive — no report tabs older than the last ' + KEEP + ' months.');
+    ui.alert('Nothing to archive - no report tabs older than the last ' + KEEP + ' months.');
     return;
   }
 
   const uncharged = countUnchargedOn(targets);
   let msg = 'Move ' + targets.length + ' report tab' + (targets.length !== 1 ? 's' : '') +
     ' older than the last ' + KEEP + ' months into the archive spreadsheet?\n\n' +
-    'They are copied to the archive first, so nothing is lost — including ' +
+    'They are copied to the archive first, so nothing is lost - including ' +
     'Charged? ticks and outreach history.\n\n';
   if (uncharged > 0) {
     msg += 'HEADS UP: ' + uncharged + ' player' + (uncharged !== 1 ? 's are' : ' is') +
@@ -2523,7 +2523,7 @@ function menuArchiveOldReports() {
   const result = archiveOldReports(KEEP);
   ui.alert('Archived ' + result.moved + ' tab' + (result.moved !== 1 ? 's' : '') + '.' +
     (result.skipped > 0 ? '\n\nSkipped ' + result.skipped + ':\n' + result.errors.join('\n') : '') +
-    '\n\nReload this spreadsheet — it should open much faster now.');
+    '\n\nReload this spreadsheet - it should open much faster now.');
 }
 
 // ============================================================
@@ -2536,17 +2536,17 @@ function menuArchiveOldReports() {
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
   ui.createMenu('IJTA Reports')
-    .addItem('Generate This Month — All Reports', 'menuCurrentMonthAll')
-    .addItem('Generate Last Month — All Reports', 'menuLastMonthAll')
+    .addItem('Generate This Month - All Reports', 'menuCurrentMonthAll')
+    .addItem('Generate Last Month - All Reports', 'menuLastMonthAll')
     .addSeparator()
-    .addItem('Master Summary (All Clinics) — This Month', 'menuCurrentMonthMaster')
-    .addItem('Master Summary (All Clinics) — Last Month', 'menuLastMonthMaster')
+    .addItem('Master Summary (All Clinics) - This Month', 'menuCurrentMonthMaster')
+    .addItem('Master Summary (All Clinics) - Last Month', 'menuLastMonthMaster')
     .addSeparator()
-    .addItem('Generate This Month — Billing Only', 'menuCurrentMonthBilling')
-    .addItem('Generate This Month — A/S Summary Only', 'menuCurrentMonthAS')
+    .addItem('Generate This Month - Billing Only', 'menuCurrentMonthBilling')
+    .addItem('Generate This Month - A/S Summary Only', 'menuCurrentMonthAS')
     .addSeparator()
-    .addItem('Generate Last Month — Billing Only', 'menuLastMonthBilling')
-    .addItem('Generate Last Month — A/S Summary Only', 'menuLastMonthAS')
+    .addItem('Generate Last Month - Billing Only', 'menuLastMonthBilling')
+    .addItem('Generate Last Month - A/S Summary Only', 'menuLastMonthAS')
     .addSeparator()
     .addItem('Update Families List', 'menuUpdateFamilies')
     .addItem('Sync Contacts from Sign-Up Sheet', 'menuSyncContacts')
@@ -2559,7 +2559,7 @@ function onOpen() {
   ui.createMenu('Roll Reminders')
     .addItem('Send Me a Test Alert', 'menuTestReminder')
     .addItem('Check for Missing Rolls Now', 'menuCheckMissingNow')
-    .addItem('Show What’s Missing', 'menuShowMissing')
+    .addItem("Show What's Missing", 'menuShowMissing')
     .addToUi();
 }
 
@@ -2634,14 +2634,14 @@ function setupMonthlyTrigger() {
     }
   }
 
-  // Create a new monthly trigger — runs on the 1st of each month
+  // Create a new monthly trigger - runs on the 1st of each month
   ScriptApp.newTrigger('generateLastMonthAllReports')
     .timeBased()
     .onMonthDay(1)
     .atHour(0)
     .create();
 
-  Logger.log('Monthly trigger set up — billing + A/S summary will run on the 1st of each month');
+  Logger.log('Monthly trigger set up - billing + A/S summary will run on the 1st of each month');
 }
 
 // ============================================================
@@ -2652,18 +2652,18 @@ function setupMonthlyTrigger() {
 // the list to the app for an in-app warning badge.
 //
 // EVERYTHING is managed from tabs in the ROSTER spreadsheet
-// (same place as Coaches & Clinic Config) — no code changes needed:
-//   "Clinic Schedule"   — Clinic Name | Days | Owner (coach name)
+// (same place as Coaches & Clinic Config) - no code changes needed:
+//   "Clinic Schedule"   - Clinic Name | Days | Owner (coach name)
 //                         (alerts for a missing roll go to that clinic's
 //                          owner, with the email looked up on the Coaches tab)
-//   "Coaches"           — add an "Email" column so names resolve to emails
-//   "Alert Recipients"  — Name | Email (admins: get EVERY alert; also the
+//   "Coaches"           - add an "Email" column so names resolve to emails
+//   "Alert Recipients"  - Name | Email (admins: get EVERY alert; also the
 //                         fallback when a clinic has no owner set)
-//   "Reminder Settings" — "Reminders On?" | Yes/No  (master switch)
+//   "Reminder Settings" - "Reminders On?" | Yes/No  (master switch)
 //
 // ONE-TIME SETUP (run each once from the editor's Run button):
-//   1. setupReminderTabs()         — creates the three tabs, pre-filled
-//   2. setupMissingRollTriggers()  — schedules the 8pm + 7am checks
+//   1. setupReminderTabs()         - creates the three tabs, pre-filled
+//   2. setupMissingRollTriggers()  - schedules the 8pm + 7am checks
 // Then redeploy (New version) so the app can read the missing list.
 //
 // DAY-TO-DAY: use the "Roll Reminders" menu in the spreadsheet.
@@ -2706,7 +2706,7 @@ function getClinicScheduleDetailed() {
   }
 
   // Accepts a real Date cell, "8/24/2026", "8/24/26" (2-digit year), or
-  // "2026-08-24". A 2-digit year is treated as 20xx — without this, text
+  // "2026-08-24". A 2-digit year is treated as 20xx - without this, text
   // like "8/24/26" would parse as the year 26 AD and silently disable the
   // whole start-date filter.
   const toDate = (v) => {
@@ -2832,7 +2832,7 @@ function getLoggedSet(startDate, endDate) {
         if (!rd) continue;
         const clinic = (data[i][1] || '').toString().trim();
         if (!clinic) continue;
-        // ANY row counts as logged — including a "No Attendees" row.
+        // ANY row counts as logged - including a "No Attendees" row.
         logged[(rd.getMonth() + 1) + '/' + rd.getDate() + '/' + rd.getFullYear() + '|||' + clinic] = true;
       }
     }
@@ -2885,7 +2885,7 @@ function getCurrentMissingRolls() {
 
 function sendMissingRollEmail(recipients, missing, isTest) {
   const n = missing.length;
-  // Subject must stay plain ASCII — emoji and special dashes get garbled by mail clients
+  // Subject must stay plain ASCII - emoji and special dashes get garbled by mail clients
   const subject = (isTest ? '[TEST] ' : '') + 'Missing Roll Alert - ' +
     n + (n !== 1 ? ' clinics need' : ' clinic needs') + ' attendance';
 
@@ -2898,7 +2898,7 @@ function sendMissingRollEmail(recipients, missing, isTest) {
   html += '</ul>';
   html += '<p><a href="' + ROLL_APP_URL + '" style="display:inline-block;background:#021f3d;color:#fff;' +
     'padding:10px 18px;border-radius:8px;text-decoration:none;font-weight:bold;">Open the Roll App</a></p>';
-  if (isTest) html += '<p style="color:#888;font-size:12px;">This is a test — your reminder system is working.</p>';
+  if (isTest) html += '<p style="color:#888;font-size:12px;">This is a test - your reminder system is working.</p>';
   html += '</div>';
 
   MailApp.sendEmail({ to: recipients.join(','), subject: subject, htmlBody: html });
@@ -2955,13 +2955,13 @@ function sendTargetedAlerts(missing, isTest) {
     sent++;
   }
   if (sent === 0) {
-    Logger.log('Missing rolls found but no recipients resolved — check Alert Recipients and the Coaches Email column.');
+    Logger.log('Missing rolls found but no recipients resolved - check Alert Recipients and the Coaches Email column.');
   }
   return sent;
 }
 
-function checkMissingRollsEvening() { emailMissingRolls(true); }   // 8pm — includes today
-function checkMissingRollsMorning() { emailMissingRolls(false); }  // 7am — through yesterday
+function checkMissingRollsEvening() { emailMissingRolls(true); }   // 8pm - includes today
+function checkMissingRollsMorning() { emailMissingRolls(false); }  // 7am - through yesterday
 
 // ---- One-time setup ----
 
@@ -3001,7 +3001,7 @@ function setupReminderTabs() {
 
 // One-time upgrade for targeted alerts: adds an "Owner" column to
 // Clinic Schedule and an "Email" column to Coaches (skips any that
-// already exist). Fill them in afterward — the owner name must match
+// already exist). Fill them in afterward - the owner name must match
 // the Coaches tab spelling.
 function setupOwnerColumns() {
   const ss = SpreadsheetApp.openById(ROSTER_SHEET_ID);
@@ -3029,14 +3029,14 @@ function setupOwnerColumns() {
     }
   }
 
-  Logger.log('Owner/Email columns ready — fill them in on the roster spreadsheet.');
+  Logger.log('Owner/Email columns ready - fill them in on the roster spreadsheet.');
 }
 
 // One-time upgrade: adds optional "Starts" and "Ends" date columns to the
 // Clinic Schedule tab. Leave them blank for a day the clinic has always
 // met. Fill "Starts" when a clinic BEGINS meeting a new day mid-season, so
 // earlier weeks aren't retroactively flagged as missing rolls. A clinic can
-// have several rows — e.g. "Red Ball | Wed" (blank) plus
+// have several rows - e.g. "Red Ball | Wed" (blank) plus
 // "Red Ball | Mon | Starts 8/24/2026".
 function setupScheduleDateColumns() {
   const sheet = SpreadsheetApp.openById(ROSTER_SHEET_ID).getSheetByName('Clinic Schedule');
@@ -3106,14 +3106,14 @@ function menuCheckMissingNow() {
   }
   const missing = getCurrentMissingRolls();
   if (missing.length === 0) {
-    ui.alert('✅ All caught up — no missing rolls.');
+    ui.alert('\u2705 All caught up - no missing rolls.');
     return;
   }
   const sent = sendTargetedAlerts(missing, false);
   if (sent === 0) {
     ui.alert('Found ' + missing.length + ' missing roll(s), but no recipients could be resolved. Check the "Alert Recipients" tab and the Email column on the Coaches tab.');
   } else {
-    ui.alert('Sent ' + sent + ' alert email(s) covering ' + missing.length + ' missing roll(s) — each person only gets their own clinics.');
+    ui.alert('Sent ' + sent + ' alert email(s) covering ' + missing.length + ' missing roll(s) - each person only gets their own clinics.');
   }
 }
 
@@ -3121,10 +3121,10 @@ function menuShowMissing() {
   const ui = SpreadsheetApp.getUi();
   const missing = getCurrentMissingRolls();
   if (missing.length === 0) {
-    ui.alert('✅ All caught up — no missing rolls.');
+    ui.alert('\u2705 All caught up - no missing rolls.');
     return;
   }
   let txt = 'Missing rolls (scheduled but not logged):\n\n';
-  for (const m of missing) txt += '• ' + m.day + ' ' + m.date + ' — ' + m.clinic + '\n';
+  for (const m of missing) txt += '\u2022 ' + m.day + ' ' + m.date + ' - ' + m.clinic + '\n';
   ui.alert(txt);
 }
