@@ -1605,6 +1605,30 @@ function setupBillingReminders() {
 }
 
 // Menu handler: send the digest on demand.
+// One-time setup, safe to re-run: installs the date-stamping trigger on the
+// Collections sheet and builds the list for the first time. Kept separate from
+// "Refresh Collections List" because only this one touches triggers.
+function menuSetupCollections() {
+  const ui = SpreadsheetApp.getUi();
+  if (!COLLECTIONS_SHEET_ID) {
+    ui.alert('No collections spreadsheet set. Create one, then paste its ID ' +
+      'into COLLECTIONS_SHEET_ID at the top of this script and Save.');
+    return;
+  }
+  try {
+    setupCollections();
+  } catch (err) {
+    ui.alert('Could not set up the collections sheet.\n\n' + err.message +
+      '\n\nIf that says permission, make sure the collections spreadsheet is ' +
+      'shared with this account as an Editor.');
+    return;
+  }
+  const r = refreshCollections();
+  ui.alert('Collections sheet is ready.\n\n' +
+    r.outstanding + ' famil' + (r.outstanding !== 1 ? 'ies' : 'y') + ' currently owing.\n\n' +
+    'Last Contact will now stamp itself whenever Outreach is set.');
+}
+
 function menuRefreshCollections() {
   const r = refreshCollections();
   SpreadsheetApp.getUi().alert(
@@ -2550,6 +2574,7 @@ function onOpen() {
     .addSeparator()
     .addItem('Update Families List', 'menuUpdateFamilies')
     .addItem('Sync Contacts from Sign-Up Sheet', 'menuSyncContacts')
+    .addItem('Set Up Collections Sheet (one time)', 'menuSetupCollections')
     .addItem('Refresh Collections List', 'menuRefreshCollections')
     .addItem('Send Uncharged Billing Digest Now', 'menuSendUnchargedDigest')
     .addSeparator()
