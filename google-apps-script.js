@@ -1414,6 +1414,10 @@ function refreshCollections(monthsBack) {
   // --- Rewrite the sheet --------------------------------------------------
   sheet.clear();
   sheet.clearConditionalFormatRules();
+  // clear() wipes contents and formatting but NOT data validation, so an
+  // Outreach dropdown from an earlier column layout would be left stranded
+  // on whatever column now sits in that position (it landed on Total Owed).
+  sheet.getRange(1, 1, sheet.getMaxRows(), sheet.getMaxColumns()).clearDataValidations();
   const W = COLLECTIONS_HEADERS.length;
   sheet.getRange(1, 1, 1, W).setValues([COLLECTIONS_HEADERS])
     .setFontWeight('bold').setBackground('#021f3d').setFontColor('white');
