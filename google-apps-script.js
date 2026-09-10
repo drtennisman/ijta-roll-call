@@ -1393,6 +1393,11 @@ function refreshCollections(monthsBack) {
     const p = kept[k];
     if (!p.family || !p.month) continue;
     if (collectionsSkips(p.clinic)) continue;     // drops any rows left from before
+    // A row is kept after payment only for the history on it. One that was
+    // already Paid last time and carries no outreach or notes is just clutter,
+    // so it retires here - which is also what clears out the rows an earlier
+    // version of this function accumulated.
+    if (p.status === 'Paid' && !p.outreach && !p.notes) continue;
     if (p.status !== 'Paid') resolved++;
     rows.push({ month: p.month, monthDate: monthFromLabel(p.month), clinic: p.clinic,
                 family: p.family, phone: p.phone, email: p.email,
@@ -1437,8 +1442,10 @@ function refreshCollections(monthsBack) {
       const monthOwed = rows.filter(x => x.month === r.month && !x.paid)
                             .reduce((s, x) => s + x.total, 0);
       const monthFams = rows.filter(x => x.month === r.month && !x.paid).length;
-      const label = r.month.toUpperCase() + '   \u2014   ' + monthFams +
-        ' famil' + (monthFams !== 1 ? 'ies' : 'y') + ' \u00b7 $' + monthOwed.toFixed(2);
+      const label = r.month.toUpperCase() + '   \u2014   ' + (monthFams === 0
+        ? 'all charged'
+        : monthFams + ' famil' + (monthFams !== 1 ? 'ies' : 'y') +
+          ' \u00b7 $' + monthOwed.toFixed(2));
       out.push([label, '', '', '', '', '', '', '', '', '', '']);
       bandRows.push(out.length + 1);
       lastMonth = r.month;
@@ -1456,10 +1463,19 @@ function refreshCollections(monthsBack) {
   }
 
   if (out.length > 0) {
-    sheet.getRange(2, 1, out.length, W).setValues(out);
-    sheet.getRange(2, 7, out.length, 1).setNumberFormat('$#,##0.00');
-    sheet.getRange(2, 10, out.length, 1).setNumberFormat('M/d/yyyy');
-    sheet.getRange(2, 4, out.length, 1).setNumberFormat('@');
+    const n = out.length;
+    // Formats go on BEFORE the values. Sheets silently converts anything that
+    // looks like a date on write, so "August 2026" would land as a real Date;
+    // reading it back gives "Sat Aug 01 2026 00:00:00 GMT-0500...", which no
+    // longer matches the month|||clinic|||family key. Every row would then look
+    // new, get re-added, and the old one marked Paid - the sheet grows forever
+    // and the shop manager's notes stop carrying across. Same for phone
+    // numbers, which would otherwise lose a leading zero.
+    sheet.getRange(2, 1, n, 1).setNumberFormat('@');            // Month
+    sheet.getRange(2, 4, n, 1).setNumberFormat('@');            // Phone
+    sheet.getRange(2, 7, n, 1).setNumberFormat('$#,##0.00');    // Total Owed
+    sheet.getRange(2, 10, n, 1).setNumberFormat('M/d/yyyy');    // Last Contact
+    sheet.getRange(2, 1, n, W).setValues(out);
   }
 
   // Month bands: one bold navy strip per month, spanning the table
@@ -1497,10 +1513,37 @@ function collectionsKey(month, clinic, family) {
 }
 
 function monthFromLabel(label) {
+  if (label instanceof Date) return new Date(label.getFullYear(), label.getMonth(), 1);
   const parts = (label || '').toString().trim().split(' ');
   const m = MONTH_NAMES_FULL.indexOf(parts[0]);
   if (m === -1 || !parts[1]) return new Date(1970, 0, 1);
   return new Date(parseInt(parts[1], 10), m, 1);
+}
+
+// A Month cell should read "August 2026". Older refreshes let Sheets coerce
+// that into a real date, which then got written back as text, so the column
+// can hold three shapes: the label, a Date, or "Sat Aug 01 2026 00:00:00
+// GMT-0500 (Central Daylight Time)". All three come back as the label here.
+function monthLabelOf(v) {
+  if (v instanceof Date) return monthLabelOfDate(v);
+  const s = (v || '').toString().trim();
+  if (!s) return '';
+  const parts = s.split(' ');
+  if (MONTH_NAMES_FULL.indexOf(parts[0]) !== -1 && /^\d{4}$/.test(parts[1] || '')) {
+    return parts[0] + ' ' + parts[1];                    // already a clean label
+  }
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? s : monthLabelOfDate(d);
+}
+
+// A month label always meant the 1st. A timezone shift can render that instant
+// as the last evening of the month before, so take whichever of local/UTC
+// still lands on the 1st - otherwise "July 2026" comes back as "June 2026".
+function monthLabelOfDate(d) {
+  const useUTC = d.getUTCDate() === 1 && d.getDate() !== 1;
+  const m = useUTC ? d.getUTCMonth() : d.getMonth();
+  const y = useUTC ? d.getUTCFullYear() : d.getFullYear();
+  return MONTH_NAMES_FULL[m] + ' ' + y;
 }
 
 // Reads back everything a refresh must not clobber. Month band rows are
@@ -1519,7 +1562,7 @@ function readCollectionsNotes(sheet) {
   for (let i = 1; i < data.length; i++) {
     const family = (data[i][iFam] || '').toString().trim();
     if (!family) continue;                      // month band
-    const month = iM >= 0 ? (data[i][iM] || '').toString().trim() : '';
+    const month = iM >= 0 ? monthLabelOf(data[i][iM]) : '';
     const clinic = iC >= 0 ? (data[i][iC] || '').toString().trim() : '';
     kept[collectionsKey(month, clinic, family)] = {
       month: month, clinic: clinic, family: family,
