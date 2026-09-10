@@ -1307,6 +1307,16 @@ const CLINIC_TINT = {
   'MS Yellow Ball': '#bbdefb', 'HS Yellow Ball': '#d1c4e9', 'Bruno': '#eceff1'
 };
 
+// Clinics we do not collect money for. They still appear on the billing and
+// A/S reports - they are simply left off the Collections worklist, since
+// chasing those balances is not ours to do. Matched case-insensitively.
+const COLLECTIONS_SKIP_CLINICS = ['Bruno'];
+
+function collectionsSkips(clinic) {
+  const c = (clinic || '').toString().trim().toLowerCase();
+  return COLLECTIONS_SKIP_CLINICS.some(x => x.toLowerCase() === c);
+}
+
 // Rebuilds the Collections sheet from the uncharged rows on the billing
 // tabs. The sheet is rewritten each time so it can stay sorted and grouped,
 // but Outreach / Last Contact / Notes are carried across by month+clinic+
@@ -1329,6 +1339,7 @@ function refreshCollections(monthsBack) {
     const idx = name.indexOf(' - Billing - ');
     if (idx === -1) continue;
     const clinic = name.substring(0, idx).trim();
+    if (collectionsSkips(clinic)) continue;        // not ours to collect
     const monthLabel = name.substring(idx + ' - Billing - '.length).trim();
     const parts = monthLabel.split(' ');
     const mIdx = MONTH_NAMES_FULL.indexOf(parts[0]);
@@ -1381,6 +1392,7 @@ function refreshCollections(monthsBack) {
     if (entries[k]) continue;
     const p = kept[k];
     if (!p.family || !p.month) continue;
+    if (collectionsSkips(p.clinic)) continue;     // drops any rows left from before
     if (p.status !== 'Paid') resolved++;
     rows.push({ month: p.month, monthDate: monthFromLabel(p.month), clinic: p.clinic,
                 family: p.family, phone: p.phone, email: p.email,
