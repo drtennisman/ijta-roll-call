@@ -1294,8 +1294,17 @@ const BILLING_AGING_DAYS = 14;
 // One row per FAMILY per MONTH per CLINIC, so the sheet reads the way the
 // billing reports are organised. The weekly digest still groups by family,
 // so a parent with kids in two clinics gets texted once, not twice.
-const COLLECTIONS_HEADERS = ['Month', 'Clinic', 'Family', 'Phone', 'Email',
-  'Players & Amounts', 'Total Owed', 'Status', 'Outreach', 'Last Contact', 'Notes'];
+const COLLECTIONS_HEADERS = ['Month', 'Clinic', 'Family', 'Phone', 'Players',
+  'Total Owed', 'Status', 'Outreach', 'Last Contact', 'Notes'];
+
+// Attendance stores players as "Last, First". On this sheet they read the way
+// you would say them out loud on a call.
+function playerFullName(raw) {
+  const s = (raw || '').toString().trim().replace(/\s+/g, ' ');
+  if (s.indexOf(',') === -1) return s;
+  const parts = s.split(',').map(x => x.trim()).filter(String);
+  return (parts.length === 2 ? parts[1] + ' ' + parts[0] : parts.join(' ')).trim();
+}
 
 // Clinics in the order they appear on every report: youngest to oldest.
 const CLINIC_DISPLAY_ORDER = ['Red Ball', 'Orange Ball', 'Green Ball',
@@ -1365,15 +1374,12 @@ function refreshCollections(monthsBack) {
       const key = collectionsKey(monthLabel, clinic, family);
       if (!entries[key]) {
         entries[key] = { month: monthLabel, monthDate: monthDate, clinic: clinic,
-                         family: family, phone: c.phone || '', email: c.email || '',
-                         items: [], total: 0 };
+                         family: family, phone: c.phone || '', items: [], total: 0 };
       }
       const amount = Number(data[i][iF]) || 0;
-      const first = (player.split(',')[1] || player).trim();
-      entries[key].items.push(first + ' $' + amount.toFixed(2));
+      entries[key].items.push(playerFullName(player));
       entries[key].total += amount;
       if (!entries[key].phone && c.phone) entries[key].phone = c.phone;
-      if (!entries[key].email && c.email) entries[key].email = c.email;
     }
   }
 
@@ -1400,7 +1406,7 @@ function refreshCollections(monthsBack) {
     if (p.status === 'Paid' && !p.outreach && !p.notes) continue;
     if (p.status !== 'Paid') resolved++;
     rows.push({ month: p.month, monthDate: monthFromLabel(p.month), clinic: p.clinic,
-                family: p.family, phone: p.phone, email: p.email,
+                family: p.family, phone: p.phone,
                 items: p.items ? [p.items] : [], total: p.total || 0, paid: true });
   }
 
@@ -1426,7 +1432,7 @@ function refreshCollections(monthsBack) {
   const W = COLLECTIONS_HEADERS.length;
   sheet.getRange(1, 1, 1, W).setValues([COLLECTIONS_HEADERS])
     .setFontWeight('bold').setBackground('#021f3d').setFontColor('white');
-  [110, 130, 200, 120, 230, 260, 100, 100, 120, 105, 300]
+  [110, 130, 200, 120, 260, 100, 100, 120, 105, 300]
     .forEach((w, i) => sheet.setColumnWidth(i + 1, w));
   sheet.setFrozenRows(1);
   if (sheet.getName() !== 'Collections') sheet.setName('Collections');
@@ -1446,7 +1452,7 @@ function refreshCollections(monthsBack) {
         ? 'all charged'
         : monthFams + ' famil' + (monthFams !== 1 ? 'ies' : 'y') +
           ' \u00b7 $' + monthOwed.toFixed(2));
-      out.push([label, '', '', '', '', '', '', '', '', '', '']);
+      out.push([label, '', '', '', '', '', '', '', '', '']);
       bandRows.push(out.length + 1);
       lastMonth = r.month;
     }
@@ -1454,7 +1460,7 @@ function refreshCollections(monthsBack) {
     const p = kept[k] || {};
     if (kept[k]) restored++; else if (!r.paid) added++;
     if (!r.paid) owedTotal += r.total;
-    out.push([r.month, r.clinic, r.family, r.phone, r.email, r.items.join(', '),
+    out.push([r.month, r.clinic, r.family, r.phone, r.items.join(', '),
               r.paid ? 0 : r.total, r.paid ? 'Paid' : 'Outstanding',
               p.outreach || '', p.last || '', p.notes || '']);
     dataRows.push({ row: out.length + 1, clinic: r.clinic, paid: !!r.paid,
@@ -1473,8 +1479,8 @@ function refreshCollections(monthsBack) {
     // numbers, which would otherwise lose a leading zero.
     sheet.getRange(2, 1, n, 1).setNumberFormat('@');            // Month
     sheet.getRange(2, 4, n, 1).setNumberFormat('@');            // Phone
-    sheet.getRange(2, 7, n, 1).setNumberFormat('$#,##0.00');    // Total Owed
-    sheet.getRange(2, 10, n, 1).setNumberFormat('M/d/yyyy');    // Last Contact
+    sheet.getRange(2, 6, n, 1).setNumberFormat('$#,##0.00');    // Total Owed
+    sheet.getRange(2, 9, n, 1).setNumberFormat('M/d/yyyy');     // Last Contact
     sheet.getRange(2, 1, n, W).setValues(out);
   }
 
@@ -1491,11 +1497,11 @@ function refreshCollections(monthsBack) {
     sheet.getRange(d.row, 2).setBackground(CLINIC_TINT[d.clinic] || '#eceff1');
     if (d.paid) {
       sheet.getRange(d.row, 1, 1, W).setFontColor('#9e9e9e');
-      sheet.getRange(d.row, 8).setBackground('#e8f5e9');
+      sheet.getRange(d.row, 7).setBackground('#e8f5e9');          // Status
     } else {
       if (d.escalate) sheet.getRange(d.row, 3, 1, W - 2).setBackground('#ffebee');
       if (d.noPhone) sheet.getRange(d.row, 4).setBackground('#ffcdd2');
-      sheet.getRange(d.row, 9).setDataValidation(
+      sheet.getRange(d.row, 8).setDataValidation(                 // Outreach
         SpreadsheetApp.newDataValidation().requireValueInList(OUTREACH_LEVELS, true).build());
     }
   });
@@ -1556,9 +1562,11 @@ function readCollectionsNotes(sheet) {
   const col = (n) => h.indexOf(n);
   const iM = col('Month'), iC = col('Clinic'), iFam = col('Family');
   if (iFam === -1) return kept;                 // old layout or empty sheet
-  const iPh = col('Phone'), iEm = col('Email'), iIt = col('Players & Amounts'),
-        iTot = col('Total Owed'), iSt = col('Status'), iOut = col('Outreach'),
-        iLast = col('Last Contact'), iNo = col('Notes');
+  // "Players & Amounts" is the pre-rename header - still read so a sheet
+  // written by an older version keeps its notes on the first refresh.
+  const iPh = col('Phone'), iTot = col('Total Owed'), iSt = col('Status'),
+        iOut = col('Outreach'), iLast = col('Last Contact'), iNo = col('Notes');
+  const iIt = col('Players') !== -1 ? col('Players') : col('Players & Amounts');
   for (let i = 1; i < data.length; i++) {
     const family = (data[i][iFam] || '').toString().trim();
     if (!family) continue;                      // month band
@@ -1567,7 +1575,6 @@ function readCollectionsNotes(sheet) {
     kept[collectionsKey(month, clinic, family)] = {
       month: month, clinic: clinic, family: family,
       phone: iPh >= 0 ? (data[i][iPh] || '').toString().trim() : '',
-      email: iEm >= 0 ? (data[i][iEm] || '').toString().trim() : '',
       items: iIt >= 0 ? (data[i][iIt] || '').toString().trim() : '',
       total: iTot >= 0 ? (Number(data[i][iTot]) || 0) : 0,
       status: iSt >= 0 ? (data[i][iSt] || '').toString().trim() : '',
@@ -1672,7 +1679,8 @@ function sendUnchargedBillingDigest() {
   const h = data[0].map(v => (v || '').toString().trim());
   const c = (n) => h.indexOf(n);
   const iMon=c('Month'), iCli=c('Clinic'), iFam=c('Family'), iPhone=c('Phone'),
-        iItems=c('Players & Amounts'), iTotal=c('Total Owed'), iStatus=c('Status'),
+        iItems=(c('Players') !== -1 ? c('Players') : c('Players & Amounts')),
+        iTotal=c('Total Owed'), iStatus=c('Status'),
         iOut=c('Outreach'), iLast=c('Last Contact'), iNotes=c('Notes');
 
   const fmtDate = (d) => (d instanceof Date) ? (d.getMonth()+1) + '/' + d.getDate() : (d ? String(d) : '');
