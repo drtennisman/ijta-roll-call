@@ -1270,16 +1270,13 @@ function generateLastMonthBilling() {
 // ============================================================
 // UNCHARGED BILLING TRACKER
 // ============================================================
-// Each billing tab has a per-player "Charged?" checkbox the shop manager
-// ticks after charging that family in the system; "Charged On" stamps
-// itself automatically. An "Outreach" dropdown tracks follow-up attempts
-// (1st / 2nd / 3rd / No response), and "Last Contact" stamps itself the
-// same way. A weekly digest (Mon ~7am) emails everyone on the
-// self-installing "Billing Reminders" tab (in the ROSTER spreadsheet)
-// a list of players still uncharged, showing how many times each has been
-// contacted and when. Items older than 14 days past the end of their
-// billing month get a warning flag, and anyone at the final outreach stage
-// is called out separately for escalation.
+// Each billing tab has a per-player "Charged?" checkbox; "Charged On" stamps
+// itself automatically. The separate Collections spreadsheet is the shop
+// manager's worklist: one row per family (biggest balance first) with the
+// phone number and follow-up history, and a Paid box per month underneath.
+// Ticking Paid there ticks Charged? on the billing tab. A short weekly email
+// (Mon ~7am) to everyone on the self-installing "Billing Reminders" tab (in
+// the ROSTER spreadsheet) says how many families owe and links to the sheet.
 //
 // ONE-TIME SETUP: run setupBillingReminders() once from the editor, then
 // add your shop manager's email to the "Billing Reminders" tab.
@@ -1287,15 +1284,22 @@ function generateLastMonthBilling() {
 
 const BILLING_AGING_DAYS = 14;
 
-// Columns on the Collections sheet. The script owns everything up to
-// Status; Outreach / Last Contact / Notes belong to the shop manager and
-// are never written by a refresh.
+// Columns on the Collections sheet. It is grouped by FAMILY: one bold row per
+// family (who to text, what they owe in total, and the follow-up so far), then
+// one row per month per clinic underneath, each with its own Paid box.
 //
-// One row per FAMILY per MONTH per CLINIC, so the sheet reads the way the
-// billing reports are organised. The weekly digest still groups by family,
-// so a parent with kids in two clinics gets texted once, not twice.
-const COLLECTIONS_HEADERS = ['Month', 'Clinic', 'Family', 'Phone', 'Players',
-  'Total Owed', 'Status', 'Outreach', 'Last Contact', 'Notes'];
+//   Family row: Family | Phone |       |        |         | Owed (total) |      | Outreach | Last Contact | Notes
+//   Month row:         |       | Month | Clinic | Players | Owed         | Paid |
+//
+// Families are ordered by what they owe, most first. Outreach / Last Contact /
+// Notes belong to the shop manager and are carried across every refresh.
+// Ticking Paid ticks Charged? on the billing tab (see onCollectionsEdit).
+// The hidden Key column is how the script tells the two kinds of row apart and
+// which billing tab and players a Paid box belongs to - nobody needs to see it.
+const COLLECTIONS_HEADERS = ['Family', 'Phone', 'Month', 'Clinic', 'Players',
+  'Owed', 'Paid', 'Outreach', 'Last Contact', 'Notes', 'Key'];
+const COLL_COL = { family: 1, phone: 2, month: 3, clinic: 4, players: 5, owed: 6,
+                   paid: 7, outreach: 8, last: 9, notes: 10, key: 11 };
 
 // Attendance stores players as "Last, First". On this sheet they read the way
 // you would say them out loud on a call.
@@ -1310,7 +1314,7 @@ function playerFullName(raw) {
 const CLINIC_DISPLAY_ORDER = ['Red Ball', 'Orange Ball', 'Green Ball',
   'MS Yellow Ball', 'HS Yellow Ball', 'Bruno'];
 
-// Colour per clinic so a month's block can be scanned at a glance.
+// Colour per clinic so a family's months can be scanned at a glance.
 const CLINIC_TINT = {
   'Red Ball': '#ffcdd2', 'Orange Ball': '#ffe0b2', 'Green Ball': '#c8e6c9',
   'MS Yellow Ball': '#bbdefb', 'HS Yellow Ball': '#d1c4e9', 'Bruno': '#eceff1'
@@ -1326,11 +1330,33 @@ function collectionsSkips(clinic) {
   return COLLECTIONS_SKIP_CLINICS.some(x => x.toLowerCase() === c);
 }
 
-// Rebuilds the Collections sheet from the uncharged rows on the billing
-// tabs. The sheet is rewritten each time so it can stay sorted and grouped,
-// but Outreach / Last Contact / Notes are carried across by month+clinic+
-// family, so nothing the shop manager typed is ever lost. Families who have
-// since been charged stay on the sheet marked Paid rather than vanishing.
+// Hidden Key column. A family row is "F|||<family>"; a month row is
+// "M|||<family>|||<month>|||<clinic>|||<Last, First>;;<Last, First>" - the
+// players exactly as the billing tab spells them, so a Paid tick can find them.
+const COLL_KEY_SEP = '|||';
+
+function familyRowKey(family) {
+  return 'F' + COLL_KEY_SEP + family;
+}
+
+function monthRowKey(line) {
+  return ['M', line.family, line.month, line.clinic, line.raws.join(';;')].join(COLL_KEY_SEP);
+}
+
+function parseCollectionsRowKey(v) {
+  const parts = (v || '').toString().split(COLL_KEY_SEP);
+  if (parts[0] === 'F' && parts[1]) return { type: 'F', family: parts[1] };
+  if (parts[0] === 'M' && parts.length >= 4) {
+    return { type: 'M', family: parts[1], month: parts[2], clinic: parts[3],
+             raws: (parts[4] || '').split(';;').filter(String) };
+  }
+  return null;
+}
+
+// Rebuilds the Collections sheet from the billing tabs. The billing sheet is
+// the truth for who has been charged; the sheet is rewritten each time so it
+// stays sorted, but Outreach / Last Contact / Notes are carried across by
+// family, so nothing the shop manager typed is ever lost.
 function refreshCollections(monthsBack) {
   if (!COLLECTIONS_SHEET_ID) throw new Error('COLLECTIONS_SHEET_ID is not set.');
   const months = monthsBack || 3;
@@ -1340,9 +1366,11 @@ function refreshCollections(monthsBack) {
   cutoff.setMonth(cutoff.getMonth() - (months - 1));
   cutoff.setDate(1); cutoff.setHours(0,0,0,0);
 
-  // --- Gather uncharged players, keyed by month + clinic + family ---------
+  // --- Every billed player in the window, charged or not ------------------
+  // Grouped by month + clinic + family. Charged players are gathered too, so
+  // a month that has just been paid can still be shown (greyed, box ticked).
   const ss = SpreadsheetApp.openById(BILLING_SHEET_ID);
-  const entries = {};
+  const lines = {};
   for (const sheet of ss.getSheets()) {
     const name = sheet.getName();
     const idx = name.indexOf(' - Billing - ');
@@ -1365,169 +1393,162 @@ function refreshCollections(monthsBack) {
     for (let i = 1; i < data.length; i++) {
       if (typeof data[i][iS] !== 'number') continue;        // skips summary rows
       const player = (data[i][0] || '').toString().trim();
-      if (!player || data[i][iC] === true) continue;
+      if (!player) continue;
 
       const c = contacts[player.toLowerCase()] || {};
       // Families are keyed by the parent we'd actually text; without a
       // contact on file, fall back to surname so siblings still group.
       const family = c.parent || (player.split(',')[0].trim() + ' (no contact)');
       const key = collectionsKey(monthLabel, clinic, family);
-      if (!entries[key]) {
-        entries[key] = { month: monthLabel, monthDate: monthDate, clinic: clinic,
-                         family: family, phone: c.phone || '', items: [], total: 0 };
+      if (!lines[key]) {
+        lines[key] = { month: monthLabel, monthDate: monthDate, clinic: clinic, family: family,
+                       phone: '', open: { players: [], raws: [], amount: 0 },
+                       done: { players: [], raws: [], amount: 0 } };
       }
-      const amount = Number(data[i][iF]) || 0;
-      entries[key].items.push(playerFullName(player));
-      entries[key].total += amount;
-      if (!entries[key].phone && c.phone) entries[key].phone = c.phone;
+      const part = data[i][iC] === true ? lines[key].done : lines[key].open;
+      part.players.push(playerFullName(player));
+      part.raws.push(player);
+      part.amount += Number(data[i][iF]) || 0;
+      if (!lines[key].phone && c.phone) lines[key].phone = c.phone;
     }
   }
 
   // --- Preserve whatever the shop manager typed last time -----------------
   const cs = SpreadsheetApp.openById(COLLECTIONS_SHEET_ID);
-  let sheet = cs.getSheets()[0];
+  const sheet = cs.getSheets()[0];
   const kept = readCollectionsNotes(sheet);
+  const history = (family) => kept.families[family.toLowerCase()] || {};
 
-  // --- Order: newest month first, then clinic order, then family ---------
-  const rows = [];
-  for (const k in entries) rows.push(entries[k]);
-  // Anyone who was on the sheet before but no longer owes: keep them, marked
-  // Paid, so the follow-up history stays visible.
-  let resolved = 0;
-  for (const k in kept) {
-    if (entries[k]) continue;
-    const p = kept[k];
-    if (!p.family || !p.month) continue;
-    if (collectionsSkips(p.clinic)) continue;     // drops any rows left from before
-    // A row is kept after payment only for the history on it. One that was
-    // already Paid last time and carries no outreach or notes is just clutter,
-    // so it retires here - which is also what clears out the rows an earlier
-    // version of this function accumulated.
-    if (p.status === 'Paid' && !p.outreach && !p.notes) continue;
-    if (p.status !== 'Paid') resolved++;
-    rows.push({ month: p.month, monthDate: monthFromLabel(p.month), clinic: p.clinic,
-                family: p.family, phone: p.phone,
-                items: p.items ? [p.items] : [], total: p.total || 0, paid: true });
+  // --- Group months under families ----------------------------------------
+  const fams = {};
+  let added = 0, carried = 0;
+  for (const key in lines) {
+    const L = lines[key];
+    const paid = L.open.raws.length === 0;
+    const prev = kept.lines[key];
+    if (paid) {
+      // Charged before it ever reached this sheet: nothing to follow up.
+      if (!prev) continue;
+      // A paid month stays for one refresh so the tick is visible, and for as
+      // long as the family has outreach or notes on file. Otherwise it retires.
+      const hist = history(L.family);
+      if (prev.paid && !hist.outreach && !hist.notes) continue;
+    }
+    if (prev) carried++; else added++;
+    const part = paid ? L.done : L.open;
+    const fk = L.family.toLowerCase();
+    if (!fams[fk]) fams[fk] = { family: L.family, phone: '', owed: 0, lines: [] };
+    const f = fams[fk];
+    if (!f.phone && L.phone) f.phone = L.phone;
+    if (!paid) f.owed += part.amount;
+    f.lines.push({ family: L.family, month: L.month, monthDate: L.monthDate, clinic: L.clinic,
+                   players: part.players, raws: part.raws, amount: part.amount, paid: paid });
   }
 
+  // --- Order: biggest balance first; each family's months oldest first ----
   const clinicRank = (c) => {
     const i = CLINIC_DISPLAY_ORDER.indexOf(c);
     return i === -1 ? CLINIC_DISPLAY_ORDER.length : i;
   };
-  rows.sort((a, b) => {
-    if (+b.monthDate !== +a.monthDate) return b.monthDate - a.monthDate;   // newest first
-    if (a.paid !== b.paid) return a.paid ? 1 : -1;                          // owing above paid
-    const r = clinicRank(a.clinic) - clinicRank(b.clinic);
-    if (r !== 0) return r;
-    return a.family.toLowerCase() < b.family.toLowerCase() ? -1 : 1;
-  });
+  const cents = (x) => Math.round(x * 100);
+  const famList = Object.keys(fams).map(k => fams[k]);
+  famList.forEach(f => f.lines.sort((a, b) =>
+    (a.monthDate - b.monthDate) || (clinicRank(a.clinic) - clinicRank(b.clinic))));
+  famList.sort((a, b) => (cents(b.owed) - cents(a.owed)) ||
+    (a.family.toLowerCase() < b.family.toLowerCase() ? -1 : 1));
 
   // --- Rewrite the sheet --------------------------------------------------
   sheet.clear();
   sheet.clearConditionalFormatRules();
-  // clear() wipes contents and formatting but NOT data validation, so an
-  // Outreach dropdown from an earlier column layout would be left stranded
-  // on whatever column now sits in that position (it landed on Total Owed).
-  sheet.getRange(1, 1, sheet.getMaxRows(), sheet.getMaxColumns()).clearDataValidations();
+  const whole = sheet.getRange(1, 1, sheet.getMaxRows(), sheet.getMaxColumns());
+  // clear() wipes contents and formatting but NOT data validation, so a
+  // dropdown or checkbox from an earlier layout would be left stranded on
+  // whatever column now sits in that position. The old layout also merged a
+  // month band across the row, which would swallow a family row.
+  whole.clearDataValidations();
+  whole.breakApart();
   const W = COLLECTIONS_HEADERS.length;
   sheet.getRange(1, 1, 1, W).setValues([COLLECTIONS_HEADERS])
     .setFontWeight('bold').setBackground('#021f3d').setFontColor('white');
-  [110, 130, 200, 120, 260, 100, 100, 120, 105, 300]
+  [210, 120, 110, 130, 240, 90, 55, 120, 105, 300, 80]
     .forEach((w, i) => sheet.setColumnWidth(i + 1, w));
   sheet.setFrozenRows(1);
   if (sheet.getName() !== 'Collections') sheet.setName('Collections');
 
   const out = [];          // values to write
-  const bandRows = [];     // 1-based row numbers of month header bands
-  const dataRows = [];     // { row, clinic, escalate, paid, noPhone }
-  let added = 0, restored = 0, owedTotal = 0;
-  let lastMonth = null;
+  const famRows = [];      // { row, owing, escalate, noPhone }
+  const monthRows = [];    // { row, clinic, paid }
+  let owedTotal = 0, owing = 0, escalate = 0, notContacted = 0, noPhone = 0;
 
-  for (const r of rows) {
-    if (r.month !== lastMonth) {
-      const monthOwed = rows.filter(x => x.month === r.month && !x.paid)
-                            .reduce((s, x) => s + x.total, 0);
-      const monthFams = rows.filter(x => x.month === r.month && !x.paid).length;
-      const label = r.month.toUpperCase() + '   \u2014   ' + (monthFams === 0
-        ? 'all charged'
-        : monthFams + ' famil' + (monthFams !== 1 ? 'ies' : 'y') +
-          ' \u00b7 $' + monthOwed.toFixed(2));
-      out.push([label, '', '', '', '', '', '', '', '', '']);
-      bandRows.push(out.length + 1);
-      lastMonth = r.month;
+  for (const f of famList) {
+    const hist = history(f.family);
+    const isOwing = cents(f.owed) > 0;
+    const isEscalated = OUTREACH_ESCALATE.indexOf(hist.outreach || '') !== -1;
+    if (isOwing) {
+      owing++;
+      owedTotal += f.owed;
+      if (!hist.outreach) notContacted++;
+      if (isEscalated) escalate++;
+      if (!f.phone) noPhone++;
     }
-    const k = collectionsKey(r.month, r.clinic, r.family);
-    const p = kept[k] || {};
-    if (kept[k]) restored++; else if (!r.paid) added++;
-    if (!r.paid) owedTotal += r.total;
-    out.push([r.month, r.clinic, r.family, r.phone, r.items.join(', '),
-              r.paid ? 0 : r.total, r.paid ? 'Paid' : 'Outstanding',
-              p.outreach || '', p.last || '', p.notes || '']);
-    dataRows.push({ row: out.length + 1, clinic: r.clinic, paid: !!r.paid,
-                    escalate: OUTREACH_ESCALATE.indexOf(p.outreach || '') !== -1,
-                    noPhone: !r.phone });
+    out.push([f.family, f.phone, '', '', '', f.owed, '',
+              hist.outreach || '', hist.last || '', hist.notes || '', familyRowKey(f.family)]);
+    famRows.push({ row: out.length + 1, owing: isOwing, escalate: isOwing && isEscalated,
+                   noPhone: !f.phone });
+    for (const l of f.lines) {
+      out.push(['', '', l.month, l.clinic, l.players.join(', '), l.amount, l.paid,
+                '', '', '', monthRowKey(l)]);
+      monthRows.push({ row: out.length + 1, clinic: l.clinic, paid: l.paid });
+    }
   }
 
   if (out.length > 0) {
     const n = out.length;
     // Formats go on BEFORE the values. Sheets silently converts anything that
-    // looks like a date on write, so "August 2026" would land as a real Date;
-    // reading it back gives "Sat Aug 01 2026 00:00:00 GMT-0500...", which no
-    // longer matches the month|||clinic|||family key. Every row would then look
-    // new, get re-added, and the old one marked Paid - the sheet grows forever
-    // and the shop manager's notes stop carrying across. Same for phone
+    // looks like a date on write, so "August 2026" would land as a real Date
+    // and read back as "Sat Aug 01 2026 00:00:00 GMT-0500...". Same for phone
     // numbers, which would otherwise lose a leading zero.
-    sheet.getRange(2, 1, n, 1).setNumberFormat('@');            // Month
-    sheet.getRange(2, 4, n, 1).setNumberFormat('@');            // Phone
-    sheet.getRange(2, 6, n, 1).setNumberFormat('$#,##0.00');    // Total Owed
-    sheet.getRange(2, 9, n, 1).setNumberFormat('M/d/yyyy');     // Last Contact
+    sheet.getRange(2, COLL_COL.phone, n, 1).setNumberFormat('@');
+    sheet.getRange(2, COLL_COL.month, n, 1).setNumberFormat('@');
+    sheet.getRange(2, COLL_COL.owed, n, 1).setNumberFormat('$#,##0.00');
+    sheet.getRange(2, COLL_COL.last, n, 1).setNumberFormat('M/d/yyyy');
+    sheet.getRange(2, COLL_COL.key, n, 1).setNumberFormat('@');
+    // insertCheckboxes() resets every cell it touches to unticked, so the
+    // boxes go in before the values that say which ones are ticked.
+    monthRows.forEach(m => sheet.getRange(m.row, COLL_COL.paid).insertCheckboxes());
     sheet.getRange(2, 1, n, W).setValues(out);
   }
+  sheet.hideColumns(COLL_COL.key);
 
-  // Month bands: one bold navy strip per month, spanning the table
-  bandRows.forEach(r => {
-    sheet.getRange(r, 1, 1, W).merge()
-      .setBackground('#e8eaf6').setFontWeight('bold').setFontColor('#021f3d')
-      .setFontSize(11).setVerticalAlignment('middle');
-    sheet.setRowHeight(r, 26);
-  });
-
-  // Per-row colour: clinic tint, escalation flag, greyed-out paid rows
-  dataRows.forEach(d => {
-    sheet.getRange(d.row, 2).setBackground(CLINIC_TINT[d.clinic] || '#eceff1');
-    if (d.paid) {
-      sheet.getRange(d.row, 1, 1, W).setFontColor('#9e9e9e');
-      sheet.getRange(d.row, 7).setBackground('#e8f5e9');          // Status
-    } else {
-      if (d.escalate) sheet.getRange(d.row, 3, 1, W - 2).setBackground('#ffebee');
-      if (d.noPhone) sheet.getRange(d.row, 4).setBackground('#ffcdd2');
-      sheet.getRange(d.row, 8).setDataValidation(                 // Outreach
+  famRows.forEach(d => {
+    sheet.getRange(d.row, 1, 1, W - 1).setBackground(d.escalate ? '#ffebee' : '#e8eaf6')
+      .setFontColor(d.owing ? '#021f3d' : '#9e9e9e');
+    sheet.getRange(d.row, 1, 1, COLL_COL.owed).setFontWeight('bold');
+    if (d.owing && d.noPhone) sheet.getRange(d.row, COLL_COL.phone).setBackground('#ffcdd2');
+    if (d.owing) {
+      sheet.getRange(d.row, COLL_COL.outreach).setDataValidation(
         SpreadsheetApp.newDataValidation().requireValueInList(OUTREACH_LEVELS, true).build());
     }
   });
+  monthRows.forEach(d => {
+    sheet.getRange(d.row, COLL_COL.clinic).setBackground(CLINIC_TINT[d.clinic] || '#eceff1');
+    if (d.paid) sheet.getRange(d.row, 1, 1, W - 1).setFontColor('#9e9e9e');
+  });
 
-  Logger.log('Collections: ' + dataRows.length + ' rows across ' + bandRows.length +
-    ' month(s); $' + owedTotal.toFixed(2) + ' outstanding.');
-  return { added: added, updated: restored, resolved: resolved,
-           outstanding: rows.filter(r => !r.paid).length,
-           owed: owedTotal, months: bandRows.length };
+  Logger.log('Collections: ' + owing + ' families owing $' + owedTotal.toFixed(2) +
+    ' (' + famList.length + ' families, ' + monthRows.length + ' month rows).');
+  return { added: added, updated: carried, outstanding: owing, owed: owedTotal,
+           families: famList.length, escalate: escalate, notContacted: notContacted,
+           noPhone: noPhone };
 }
 
-// month|||clinic|||family, lowercased - the identity of a Collections row.
+// month|||clinic|||family, lowercased - the identity of one month row.
 function collectionsKey(month, clinic, family) {
   return [month, clinic, family].map(s => (s || '').toString().trim().toLowerCase()).join('|||');
 }
 
-function monthFromLabel(label) {
-  if (label instanceof Date) return new Date(label.getFullYear(), label.getMonth(), 1);
-  const parts = (label || '').toString().trim().split(' ');
-  const m = MONTH_NAMES_FULL.indexOf(parts[0]);
-  if (m === -1 || !parts[1]) return new Date(1970, 0, 1);
-  return new Date(parseInt(parts[1], 10), m, 1);
-}
-
 // A Month cell should read "August 2026". Older refreshes let Sheets coerce
-// that into a real date, which then got written back as text, so the column
+// that into a real date, which then got written back as text, so an old sheet
 // can hold three shapes: the label, a Date, or "Sat Aug 01 2026 00:00:00
 // GMT-0500 (Central Daylight Time)". All three come back as the label here.
 function monthLabelOf(v) {
@@ -1552,57 +1573,182 @@ function monthLabelOfDate(d) {
   return MONTH_NAMES_FULL[m] + ' ' + y;
 }
 
-// Reads back everything a refresh must not clobber. Month band rows are
-// skipped: they have no Family, so they never look like a real record.
+// Reads back everything a refresh must not clobber:
+//   families - outreach / last contact / notes, by family
+//   lines    - whether each month row was ticked Paid, by month|||clinic|||family
+// Understands the current family-grouped layout and the older layouts that
+// had one row per month per clinic with follow-up on every row. When an older
+// sheet has several rows for one family, the furthest-along outreach wins
+// (with its date) and every distinct note is kept.
 function readCollectionsNotes(sheet) {
-  const kept = {};
+  const kept = { families: {}, lines: {} };
   if (!sheet || sheet.getLastRow() < 2) return kept;
   const data = sheet.getDataRange().getValues();
   const h = data[0].map(v => (v || '').toString().trim());
   const col = (n) => h.indexOf(n);
-  const iM = col('Month'), iC = col('Clinic'), iFam = col('Family');
-  if (iFam === -1) return kept;                 // old layout or empty sheet
-  // "Players & Amounts" is the pre-rename header - still read so a sheet
-  // written by an older version keeps its notes on the first refresh.
-  const iPh = col('Phone'), iTot = col('Total Owed'), iSt = col('Status'),
-        iOut = col('Outreach'), iLast = col('Last Contact'), iNo = col('Notes');
-  const iIt = col('Players') !== -1 ? col('Players') : col('Players & Amounts');
-  for (let i = 1; i < data.length; i++) {
-    const family = (data[i][iFam] || '').toString().trim();
-    if (!family) continue;                      // month band
-    const month = iM >= 0 ? monthLabelOf(data[i][iM]) : '';
-    const clinic = iC >= 0 ? (data[i][iC] || '').toString().trim() : '';
-    kept[collectionsKey(month, clinic, family)] = {
-      month: month, clinic: clinic, family: family,
-      phone: iPh >= 0 ? (data[i][iPh] || '').toString().trim() : '',
-      items: iIt >= 0 ? (data[i][iIt] || '').toString().trim() : '',
-      total: iTot >= 0 ? (Number(data[i][iTot]) || 0) : 0,
-      status: iSt >= 0 ? (data[i][iSt] || '').toString().trim() : '',
-      outreach: iOut >= 0 ? (data[i][iOut] || '').toString().trim() : '',
-      last: iLast >= 0 ? data[i][iLast] : '',
-      notes: iNo >= 0 ? (data[i][iNo] || '').toString().trim() : ''
-    };
+  const iOut = col('Outreach'), iLast = col('Last Contact'), iNo = col('Notes');
+  const text = (row, i) => i >= 0 ? (row[i] || '').toString().trim() : '';
+
+  const noteLists = {};
+  const addHistory = (family, row) => {
+    const k = family.toLowerCase();
+    const f = kept.families[k] || (kept.families[k] = { family: family, outreach: '', last: '', notes: '' });
+    const outreach = text(row, iOut);
+    if (outreach && (!f.outreach ||
+        OUTREACH_LEVELS.indexOf(outreach) > OUTREACH_LEVELS.indexOf(f.outreach))) {
+      f.outreach = outreach;
+      f.last = iLast >= 0 ? row[iLast] : '';
+    }
+    const note = text(row, iNo);
+    const list = noteLists[k] || (noteLists[k] = []);
+    if (note && list.indexOf(note) === -1) list.push(note);
+  };
+  const finish = () => {
+    for (const k in kept.families) kept.families[k].notes = (noteLists[k] || []).join('; ');
+    return kept;
+  };
+
+  const iKey = col('Key');
+  if (iKey !== -1) {
+    const iPaid = col('Paid');
+    for (let i = 1; i < data.length; i++) {
+      const k = parseCollectionsRowKey(data[i][iKey]);
+      if (!k) continue;
+      if (k.type === 'F') addHistory(k.family, data[i]);
+      else kept.lines[collectionsKey(k.month, k.clinic, k.family)] =
+        { paid: iPaid >= 0 && data[i][iPaid] === true };
+    }
+    return finish();
   }
-  return kept;
+
+  // Older layout. Month band rows have no Family, so they are skipped.
+  const iM = col('Month'), iC = col('Clinic'), iFam = col('Family'), iSt = col('Status');
+  if (iFam === -1) return kept;
+  for (let i = 1; i < data.length; i++) {
+    const family = text(data[i], iFam);
+    if (!family) continue;
+    const month = iM >= 0 ? monthLabelOf(data[i][iM]) : '';
+    kept.lines[collectionsKey(month, text(data[i], iC), family)] =
+      { paid: text(data[i], iSt) === 'Paid' };
+    addHistory(family, data[i]);
+  }
+  return finish();
 }
 
-// Stamps Last Contact when Outreach is set on the Collections sheet.
+// Installable onEdit trigger on the COLLECTIONS spreadsheet.
+//  - Outreach set on a family row: stamps Last Contact.
+//  - Paid ticked on a month row: ticks Charged? (and stamps Charged On) for
+//    those players on the matching billing tab. Unticking reverses it.
 function onCollectionsEdit(e) {
   try {
     const sheet = e.range.getSheet();
     const h = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
     const oCol = h.indexOf('Outreach') + 1, lCol = h.indexOf('Last Contact') + 1;
-    if (!oCol || !lCol || e.range.getColumn() !== oCol) return;
-    const start = e.range.getRow();
-    for (let r = 0; r < e.range.getNumRows(); r++) {
-      const row = start + r;
-      if (row === 1) continue;
-      const v = sheet.getRange(row, oCol).getValue();
-      const cell = sheet.getRange(row, lCol);
-      cell.setValue(v === '' || v === null ? '' : new Date());
-      cell.setNumberFormat('M/d/yyyy');
+    const pCol = h.indexOf('Paid') + 1, kCol = h.indexOf('Key') + 1;
+    const first = e.range.getColumn(), last = first + e.range.getNumColumns() - 1;
+    const start = e.range.getRow(), n = e.range.getNumRows();
+    const touches = (c) => c > 0 && c >= first && c <= last;
+
+    if (touches(oCol) && lCol) {
+      for (let r = 0; r < n; r++) {
+        const row = start + r;
+        if (row === 1) continue;
+        const v = sheet.getRange(row, oCol).getValue();
+        const cell = sheet.getRange(row, lCol);
+        cell.setValue(v === '' || v === null ? '' : new Date());
+        cell.setNumberFormat('M/d/yyyy');
+      }
     }
+    if (touches(pCol) && kCol) syncCollectionsPaid(sheet, start, n, pCol, kCol);
   } catch (err) { /* never break an edit */ }
+}
+
+// Pushes Paid ticks from the Collections sheet to the billing tabs. If a tick
+// cannot be applied, the box is put back and a note on the cell says why -
+// the Collections sheet must never claim a charge the billing sheet lacks.
+function syncCollectionsPaid(sheet, start, n, pCol, kCol) {
+  const keys = sheet.getRange(start, kCol, n, 1).getValues();
+  const ticks = sheet.getRange(start, pCol, n, 1).getValues();
+  let billing = null, openError = '';
+  try {
+    billing = SpreadsheetApp.openById(BILLING_SHEET_ID);
+  } catch (err) {
+    openError = 'Could not open the billing sheet (' + err.message + ').';
+  }
+
+  const changedRows = [];
+  for (let i = 0; i < n; i++) {
+    const row = start + i;
+    if (row === 1) continue;
+    const k = parseCollectionsRowKey(keys[i][0]);
+    if (!k || k.type !== 'M') continue;              // family rows have no box
+    if (typeof ticks[i][0] !== 'boolean') continue;
+    const paid = ticks[i][0];
+    const cell = sheet.getRange(row, pCol);
+    const problem = openError || setBillingCharged(billing, k, paid);
+    if (problem) {
+      cell.setValue(!paid);
+      cell.setNote(problem + ' Nothing was changed on the billing sheet.');
+      continue;
+    }
+    cell.clearNote();
+    sheet.getRange(row, 1, 1, COLLECTIONS_HEADERS.length - 1)
+      .setFontColor(paid ? '#9e9e9e' : '#000000');
+    changedRows.push(row);
+  }
+  if (changedRows.length) updateCollectionsFamilyTotals(sheet, changedRows);
+}
+
+// Ticks or unticks Charged? for a month row's players on its billing tab.
+// Returns '' on success, or a sentence saying what went wrong.
+function setBillingCharged(billing, k, paid) {
+  const tabName = k.clinic + ' - Billing - ' + k.month;
+  const tab = billing.getSheetByName(tabName);
+  if (!tab) return 'There is no billing tab called "' + tabName + '".';
+  const data = tab.getDataRange().getValues();
+  const h = data[0];
+  const iC = h.indexOf('Charged?'), iD = h.indexOf('Charged On'), iS = h.indexOf('Sessions');
+  if (iC === -1) return 'The "' + tabName + '" tab has no Charged? column.';
+  const want = k.raws.map(x => x.toLowerCase());
+  let matched = 0;
+  for (let i = 1; i < data.length; i++) {
+    if (iS !== -1 && typeof data[i][iS] !== 'number') continue;   // summary rows
+    const name = (data[i][0] || '').toString().trim().toLowerCase();
+    if (want.indexOf(name) === -1) continue;
+    matched++;
+    if ((data[i][iC] === true) === paid) continue;               // already right
+    tab.getRange(i + 1, iC + 1).setValue(paid);
+    if (iD !== -1) {
+      tab.getRange(i + 1, iD + 1).setValue(paid ? new Date() : '').setNumberFormat('M/d/yyyy');
+    }
+  }
+  if (matched === 0) {
+    return 'Could not find ' + k.raws.map(playerFullName).join(', ') + ' on the "' + tabName + '" tab.';
+  }
+  return '';
+}
+
+// Recomputes the Owed total on the family row above each changed month row.
+function updateCollectionsFamilyTotals(sheet, rows) {
+  const data = sheet.getDataRange().getValues();
+  const h = data[0];
+  const iKey = h.indexOf('Key'), iOwed = h.indexOf('Owed'), iPaid = h.indexOf('Paid');
+  if (iKey === -1 || iOwed === -1 || iPaid === -1) return;
+  const typeAt = (i) => { const k = parseCollectionsRowKey(data[i][iKey]); return k ? k.type : ''; };
+  const done = {};
+  rows.forEach(row => {
+    let f = row - 1;                                  // 0-based index into data
+    while (f > 0 && typeAt(f) !== 'F') f--;
+    if (f <= 0 || done[f]) return;
+    done[f] = true;
+    let owed = 0;
+    for (let i = f + 1; i < data.length && typeAt(i) !== 'F'; i++) {
+      if (typeAt(i) === 'M' && data[i][iPaid] !== true) owed += Number(data[i][iOwed]) || 0;
+    }
+    sheet.getRange(f + 1, iOwed + 1).setValue(owed);
+    sheet.getRange(f + 1, 1, 1, COLLECTIONS_HEADERS.length - 1)
+      .setFontColor(Math.round(owed * 100) > 0 ? '#021f3d' : '#9e9e9e');
+  });
 }
 
 function setupCollections() {
@@ -1611,7 +1757,7 @@ function setupCollections() {
   }
   ScriptApp.newTrigger('onCollectionsEdit').forSpreadsheet(COLLECTIONS_SHEET_ID).onEdit().create();
   const r = refreshCollections();
-  Logger.log('Collections ready - Last Contact will stamp itself when Outreach is set.');
+  Logger.log('Collections ready - Outreach stamps Last Contact, and Paid ticks the billing sheet.');
   return r;
 }
 
@@ -1660,132 +1806,47 @@ function onBillingEdit(e) {
   }
 }
 
-// Refreshes the Collections sheet, then emails what's outstanding - one
-// entry per family, with the phone number ready to paste into Google Voice
-// and the follow-up history so far. Sends nothing when everyone has paid.
-// Returns the number of families still owing.
+// Monday email: a short heads-up with a link. The Collections sheet is the
+// worklist, so the email does not repeat it - and it carries no phone
+// numbers, which mail apps turn into links that are awkward to copy.
+// Sends nothing when everyone has paid. Returns the number of families owing.
 function sendUnchargedBillingDigest() {
   const recipients = getBillingReminderRecipients();
   if (recipients.length === 0) {
-    Logger.log('No recipients on the "Billing Reminders" tab - digest not sent.');
+    Logger.log('No recipients on the "Billing Reminders" tab - collections email not sent.');
     return 0;
   }
 
-  refreshCollections();
-
-  const sheet = SpreadsheetApp.openById(COLLECTIONS_SHEET_ID).getSheets()[0];
-  const data = sheet.getDataRange().getValues();
-  if (data.length < 2) return 0;
-  const h = data[0].map(v => (v || '').toString().trim());
-  const c = (n) => h.indexOf(n);
-  const iMon=c('Month'), iCli=c('Clinic'), iFam=c('Family'), iPhone=c('Phone'),
-        iItems=(c('Players') !== -1 ? c('Players') : c('Players & Amounts')),
-        iTotal=c('Total Owed'), iStatus=c('Status'),
-        iOut=c('Outreach'), iLast=c('Last Contact'), iNotes=c('Notes');
-
-  const fmtDate = (d) => (d instanceof Date) ? (d.getMonth()+1) + '/' + d.getDate() : (d ? String(d) : '');
-
-  // The sheet is one row per family per month per clinic. The call list is one
-  // entry per FAMILY - a parent with kids in two clinics gets texted once.
-  const fams = {};
-  const order = [];
-  let owed = 0;
-  for (let i = 1; i < data.length; i++) {
-    const family = (data[i][iFam] || '').toString().trim();
-    if (!family) continue;                                      // month band row
-    if ((data[i][iStatus] || '').toString().trim() !== 'Outstanding') continue;
-    const key = family.toLowerCase();
-    if (!fams[key]) {
-      fams[key] = { family: family, phone: (data[i][iPhone] || '').toString().trim(),
-                    total: 0, lines: [], outreach: '', last: '', notes: [] };
-      order.push(key);
-    }
-    const f = fams[key];
-    const amount = Number(data[i][iTotal]) || 0;
-    const outreach = (data[i][iOut] || '').toString().trim();
-    const notes = (data[i][iNotes] || '').toString().trim();
-    f.total += amount;
-    owed += amount;
-    if (!f.phone) f.phone = (data[i][iPhone] || '').toString().trim();
-    f.lines.push({
-      month: iMon >= 0 ? (data[i][iMon] || '').toString().trim() : '',
-      clinic: iCli >= 0 ? (data[i][iCli] || '').toString().trim() : '',
-      items: (data[i][iItems] || '').toString().trim(),
-      amount: amount, outreach: outreach, last: fmtDate(data[i][iLast])
-    });
-    // Furthest-along outreach wins, so a family is judged on its latest contact.
-    if (OUTREACH_LEVELS.indexOf(outreach) > OUTREACH_LEVELS.indexOf(f.outreach)) {
-      f.outreach = outreach; f.last = fmtDate(data[i][iLast]);
-    }
-    if (notes && f.notes.indexOf(notes) === -1) f.notes.push(notes);
+  const r = refreshCollections();
+  if (r.outstanding === 0) {
+    Logger.log('Everyone has paid - no collections email sent.');
+    return 0;
   }
 
-  const rows = order.map(k => fams[k]);
-  if (rows.length === 0) return 0;
+  const url = 'https://docs.google.com/spreadsheets/d/' + COLLECTIONS_SHEET_ID + '/edit';
+  const one = r.outstanding === 1;
+  const families = r.outstanding + (one ? ' family owes' : ' families owe');
+  const owed = '$' + r.owed.toFixed(2);
 
-  const escalations = rows.filter(r => OUTREACH_ESCALATE.indexOf(r.outreach) !== -1);
-  const notContacted = rows.filter(r => !r.outreach).length;
-  const noNumber = rows.filter(r => !r.phone).length;
+  const extras = [];
+  if (r.escalate > 0) extras.push(r.escalate + (r.escalate === 1 ? ' needs' : ' need') + ' escalation');
+  if (r.notContacted > 0) extras.push(r.notContacted + ' not contacted yet');
+  if (r.noPhone > 0) extras.push(r.noPhone + ' with no phone number');
 
-  const chip = (phone) => {
-    if (!phone) return ' <span style="color:#c62828;">no number on file</span>';
-    const d = phone.replace(/[^0-9]/g, '');
-    return ' <span style="font-family:menlo,consolas,monospace;background:#f1f3f4;' +
-      'padding:2px 6px;border-radius:4px;">' + (d || phone) + '</span>';
-  };
-  const tag = (r) => {
-    const bg = CLINIC_TINT[r.clinic] || '#eceff1';
-    return '<span style="background:' + bg + ';border-radius:3px;padding:1px 6px;' +
-      'font-size:12px;">' + (r.month ? r.month.split(' ')[0] + ' \u00b7 ' : '') +
-      (r.clinic || 'Clinic') + '</span>';
-  };
-
-  let subject = 'Uncharged Billing - ' + rows.length + ' famil' + (rows.length !== 1 ? 'ies' : 'y') +
-    ' owing $' + owed.toFixed(2);
-  if (escalations.length > 0) subject += ' (' + escalations.length + ' need escalation)';
-
-  let html = '<div style="font-family:Arial,sans-serif;color:#333;">';
-  html += '<h2 style="color:#c62828;margin-bottom:4px;">&#9888;&#65039; Uncharged Billing</h2>';
-  html += '<p><strong>' + rows.length + ' famil' + (rows.length !== 1 ? 'ies' : 'y') +
-    '</strong> still owing <strong>$' + owed.toFixed(2) + '</strong>' +
-    (notContacted > 0 ? ' &mdash; ' + notContacted + ' not yet contacted' : '') +
-    (noNumber > 0 ? ' &mdash; ' + noNumber + ' with no phone number' : '') + '.</p>';
-  html += '<p><a href="https://voice.google.com/u/0/messages" ' +
-    'style="display:inline-block;background:#1a73e8;color:#fff;padding:9px 16px;' +
-    'border-radius:8px;text-decoration:none;font-weight:bold;">Open Google Voice</a> ' +
-    '<span style="color:#888;font-size:12px;">&nbsp;Double-click a number to select it, then paste.</span></p>';
-
-  if (escalations.length > 0) {
-    html += '<div style="background:#ffebee;border-left:4px solid #c62828;padding:10px 14px;margin:12px 0;">';
-    html += '<strong style="color:#c62828;">Needs escalation</strong><ul style="margin:6px 0 0 0;">';
-    escalations.forEach(r => {
-      html += '<li>' + r.family + ' &mdash; $' + r.total.toFixed(2) + chip(r.phone) +
-        ' &mdash; <em>' + r.outreach + (r.last ? ' on ' + r.last : '') + '</em>' +
-        (r.notes.length ? ' &mdash; ' + r.notes.join('; ') : '') + '</li>';
-    });
-    html += '</ul></div>';
-  }
-
-  html += '<ul style="padding-left:18px;">';
-  rows.forEach(r => {
-    html += '<li style="margin-bottom:10px;"><strong>' + r.family + '</strong> &mdash; $' +
-      r.total.toFixed(2) + chip(r.phone);
-    html += '<div style="color:#666;font-size:13px;margin-top:3px;">';
-    r.lines.forEach(l => {
-      html += tag(l) + ' ' + l.items + ' &nbsp;<strong>$' + l.amount.toFixed(2) + '</strong><br>';
-    });
-    html += (r.outreach ? r.outreach + (r.last ? ' on ' + r.last : '')
-                        : '<span style="color:#888;">not contacted yet</span>') +
-      (r.notes.length ? ' &mdash; ' + r.notes.join('; ') : '');
-    html += '</div></li>';
-  });
-  html += '</ul>';
-  html += '<p style="color:#666;font-size:13px;">Update <strong>Outreach</strong> and <strong>Notes</strong> ' +
-    'on the Collections sheet after each text &mdash; the date fills in by itself. ' +
-    'Rows drop off this list once the Charged? box is ticked on the billing sheet.</p></div>';
+  const subject = 'IJTA Collections: ' + families + ' ' + owed;
+  const html = '<div style="font-family:Arial,sans-serif;color:#333;max-width:520px;">' +
+    '<h2 style="color:#021f3d;margin:0 0 8px;">IJTA Collections</h2>' +
+    '<p style="font-size:16px;margin:0 0 4px;"><strong>' + families + '</strong> ' +
+    '<strong>' + owed + '</strong></p>' +
+    (extras.length ? '<p style="color:#666;margin:0 0 18px;">' + extras.join(' &middot; ') + '</p>' : '') +
+    '<p style="margin:18px 0;"><a href="' + url + '" style="display:inline-block;background:#021f3d;' +
+    'color:#fff;padding:11px 20px;border-radius:8px;text-decoration:none;font-weight:bold;">' +
+    'Open the Collections sheet</a></p>' +
+    '<p style="color:#888;font-size:12px;">Biggest balances are at the top. Tick Paid on a month ' +
+    'once it has been charged &mdash; the billing sheet updates itself.</p></div>';
 
   MailApp.sendEmail({ to: recipients.join(','), subject: subject, htmlBody: html });
-  return rows.length;
+  return r.outstanding;
 }
 
 // One-time setup: creates the "Billing Reminders" recipients tab, the
@@ -1837,22 +1898,21 @@ function menuSetupCollections() {
       'shared with this account as an Editor.');
     return;
   }
-  ui.alert('Collections sheet is ready.\n\n' +
-    r.outstanding + ' row' + (r.outstanding !== 1 ? 's' : '') + ' owing $' +
-    (r.owed || 0).toFixed(2) + ' across ' + r.months + ' month' +
-    (r.months !== 1 ? 's' : '') + '.\n\n' +
-    'Last Contact will now stamp itself whenever Outreach is set.');
+  ui.alert('Collections sheet is ready.\n\n' + collectionsSummary(r) + '\n\n' +
+    'Last Contact stamps itself when Outreach is set, and ticking Paid on a ' +
+    'month ticks Charged? on the billing sheet.');
+}
+
+function collectionsSummary(r) {
+  return r.outstanding + (r.outstanding === 1 ? ' family owes $' : ' families owe $') +
+    (r.owed || 0).toFixed(2) + ', biggest balance first.';
 }
 
 function menuRefreshCollections() {
   const r = refreshCollections();
-  SpreadsheetApp.getUi().alert(
-    r.outstanding + ' row' + (r.outstanding !== 1 ? 's' : '') + ' owing $' +
-    (r.owed || 0).toFixed(2) + ' across ' + r.months + ' month' +
-    (r.months !== 1 ? 's' : '') + '.\n\n' +
-    r.added + ' new, ' + r.updated + ' carried over, ' + r.resolved + ' newly paid.\n\n' +
-    'One row per family per month per clinic. Outreach and Notes were ' +
-    'carried across untouched.');
+  SpreadsheetApp.getUi().alert(collectionsSummary(r) + '\n\n' +
+    r.added + ' new month row' + (r.added !== 1 ? 's' : '') + ', ' +
+    r.updated + ' carried over. Outreach and Notes were kept.');
 }
 
 function menuSendUnchargedDigest() {
@@ -1864,8 +1924,9 @@ function menuSendUnchargedDigest() {
   }
   const count = sendUnchargedBillingDigest();
   ui.alert(count === 0
-    ? 'All charged - nothing outstanding.'
-    : 'Digest sent for ' + count + ' uncharged player' + (count !== 1 ? 's' : '') + ' to: ' + recipients.join(', '));
+    ? 'All charged - nothing outstanding, so no email was sent.'
+    : 'Collections email sent (' + count + ' famil' + (count !== 1 ? 'ies' : 'y') +
+      ' owing) to: ' + recipients.join(', '));
 }
 
 // ============================================================
