@@ -387,25 +387,122 @@ function parseDate(dateVal) {
   return null;
 }
 
+// ============================================================
+// WEDNESDAY MONTH-END RULE
+// ============================================================
+// When a month's last day is a Wednesday, that day's sessions are billed with
+// the NEXT month - first time: Wed 9/30/2026 goes on October's bills. Only a
+// Wednesday (J.C., 9/29); every clinic meets that day. Coaches take roll as
+// normal and the rows stay on the month's own attendance tab; every report
+// just counts them in the following month.
+//
+// A family never pays more or less over it: the moved Wednesday is priced as
+// part of the month it happened in - free if it would have been their free
+// clinic there, the normal session price if not (see buildClinicBillingRows).
+// It just shows up on the next month's bill. The Month-End Wednesday report
+// lists each kid's charge for it (generateWednesdayReport).
+// ============================================================
+
+function isWednesdayMonthEnd(d) {
+  const next = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1);
+  return d.getDay() === 3 && next.getDate() === 1;
+}
+
+// True when a session on date d is billed in billingMonth (1-12) / billingYear.
+function billedIn(d, billingMonth, billingYear) {
+  const b = isWednesdayMonthEnd(d) ? new Date(d.getFullYear(), d.getMonth() + 1, 1) : d;
+  return b.getMonth() + 1 === billingMonth && b.getFullYear() === billingYear;
+}
+
+// True when a session billed in billingMonth actually happened the month before.
+function isMovedIn(d, billingMonth, billingYear) {
+  return !(d.getMonth() + 1 === billingMonth && d.getFullYear() === billingYear);
+}
+
+// The attendance tabs holding a billing month's sessions: its own tab, the
+// previous month's when that one ended on a Wednesday, and the old
+// "Attendance" tab for historical data.
+function attendanceSheetsForMonth(ss, billingMonth, billingYear) {
+  const out = [];
+  const own = ss.getSheetByName(MONTH_NAMES_FULL[billingMonth - 1] + ' ' + billingYear);
+  if (own) out.push(own);
+  const prevLast = new Date(billingYear, billingMonth - 1, 0);
+  if (isWednesdayMonthEnd(prevLast)) {
+    const prev = ss.getSheetByName(MONTH_NAMES_FULL[prevLast.getMonth()] + ' ' + prevLast.getFullYear());
+    if (prev) out.push(prev);
+  }
+  const legacy = ss.getSheetByName('Attendance');
+  if (legacy) out.push(legacy);
+  return out;
+}
+
+// For a billing month that starts with a Wednesday moved in from the month
+// before: how many sessions each kid was billed for in that previous month,
+// and at what status - counted exactly the way billing counts them.
+// Keyed "clinic|||last, first". null for every other month.
+function previousMonthBilled(billingMonth, billingYear) {
+  const prevLast = new Date(billingYear, billingMonth - 1, 0);
+  if (!isWednesdayMonthEnd(prevLast)) return null;
+  const pm = prevLast.getMonth() + 1, py = prevLast.getFullYear();
+  const overrides = getStatusOverrides(MONTH_NAMES_FULL[pm - 1] + ' ' + py);
+  const seen = {}, out = {};
+  for (const r of getAttendanceForMonth(pm, py)) {
+    const name = String(r.playerName).trim().toLowerCase();
+    const k = r.clinic + '|||' + name;
+    const day = k + '|||' + r.date.getFullYear() + '-' + r.date.getMonth() + '-' + r.date.getDate();
+    if (seen[day]) continue;                       // one session per kid per clinic per day
+    seen[day] = true;
+    if (!out[k]) out[k] = { sessions: 0, status: r.status };
+    out[k].sessions++;
+  }
+  for (const k in out) {
+    const parts = k.split('|||');
+    out[k].status = resolvePlayerStatus(overrides, parts[0], parts[1], out[k].status);
+  }
+  return out;
+}
+
+// What a moved Wednesday costs: what it would have added to the month it
+// happened in, on top of the prevSessions already billed there. $0 when it
+// would have been that month's free clinic.
+function movedSessionCharge(clinic, prevStatus, prevSessions, moved) {
+  return getTotalCharge(clinic, prevStatus, prevSessions + moved) -
+         getTotalCharge(clinic, prevStatus, prevSessions);
+}
+
+// Gives a kid the facts buildClinicBillingRows needs to price a moved-in
+// Wednesday: how many they had, and their sessions/status the month before.
+function markMovedIn(p, clinic, moved, prevBilled) {
+  if (!moved || !prevBilled) return p;
+  const prev = prevBilled[clinic + '|||' + String(p.name).trim().toLowerCase()] || {};
+  p.moved = moved;
+  p.prevSessions = prev.sessions || 0;
+  p.prevStatus = prev.status || p.status;
+  return p;
+}
+
+// Same, for the reports that keep dates as { 'M/D/YYYY': [players] }.
+function markMovedInFromDates(players, clinic, dates, billingMonth, billingYear, prevBilled) {
+  if (!prevBilled) return players;
+  const moved = {};
+  for (const ds in dates) {
+    const p = ds.split('/');
+    if (+p[0] === billingMonth && +p[2] === billingYear) continue;
+    for (const n of dates[ds]) moved[n] = (moved[n] || 0) + 1;
+  }
+  players.forEach(p => markMovedIn(p, clinic, moved[p.name], prevBilled));
+  return players;
+}
+
 /**
- * Read attendance rows for a given month/year.
- * Checks the month-specific tab first (e.g. "March 2026"),
- * then falls back to the old "Attendance" tab for historical data.
- * Returns an array of { date, clinic, playerName, status } objects.
+ * Read attendance rows for a given BILLING month/year (see the Wednesday
+ * month-end rule above). Checks the month-specific tab (e.g. "March 2026"),
+ * the previous month's when needed, and the old "Attendance" tab.
+ * Returns an array of { date, clinic, playerName, status, moved } objects.
  */
 function getAttendanceForMonth(billingMonth, billingYear) {
   const ss = SpreadsheetApp.openById(ATTENDANCE_SHEET_ID);
-  const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
-    'July', 'August', 'September', 'October', 'November', 'December'];
-  const monthTabName = monthNames[billingMonth - 1] + ' ' + billingYear;
-
-  // Collect sheets to read from: month-specific tab first, then legacy "Attendance"
-  const sheetsToRead = [];
-  const monthSheet = ss.getSheetByName(monthTabName);
-  if (monthSheet) sheetsToRead.push(monthSheet);
-  const legacySheet = ss.getSheetByName('Attendance');
-  if (legacySheet) sheetsToRead.push(legacySheet);
-
+  const sheetsToRead = attendanceSheetsForMonth(ss, billingMonth, billingYear);
   if (sheetsToRead.length === 0) return [];
 
   const rows = [];
@@ -424,9 +521,10 @@ function getAttendanceForMonth(billingMonth, billingYear) {
       if (!playerName || !clinic) continue;
       if (String(playerName).trim() === 'No Attendees') continue;
       if (String(playerName).trim().indexOf('Clinic Cancelled') === 0) continue;
-      if (rowDate.getMonth() + 1 !== billingMonth || rowDate.getFullYear() !== billingYear) continue;
+      if (!billedIn(rowDate, billingMonth, billingYear)) continue;
 
-      rows.push({ date: rowDate, clinic: clinic, playerName: playerName, status: status });
+      rows.push({ date: rowDate, clinic: clinic, playerName: playerName, status: status,
+                  moved: isMovedIn(rowDate, billingMonth, billingYear) });
     }
   }
   return rows;
@@ -521,16 +619,9 @@ function parseCoachEntries(coachesStr, defaultHours) {
  */
 function getAttendanceWithCoachesForMonth(billingMonth, billingYear) {
   const ss = SpreadsheetApp.openById(ATTENDANCE_SHEET_ID);
-  const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
-    'July', 'August', 'September', 'October', 'November', 'December'];
-  const monthTabName = monthNames[billingMonth - 1] + ' ' + billingYear;
-
-  // Collect sheets to read from: month-specific tab first, then legacy "Attendance"
-  const sheetsToRead = [];
-  const monthSheet = ss.getSheetByName(monthTabName);
-  if (monthSheet) sheetsToRead.push(monthSheet);
-  const legacySheet = ss.getSheetByName('Attendance');
-  if (legacySheet) sheetsToRead.push(legacySheet);
+  // Same month rule as billing, so a moved Wednesday's coaches and players
+  // land in the same month's report as its bills.
+  const sheetsToRead = attendanceSheetsForMonth(ss, billingMonth, billingYear);
 
   if (sheetsToRead.length === 0) return { rows: [], sessionCoaches: {}, sessionMarkers: {} };
 
@@ -556,7 +647,7 @@ function getAttendanceWithCoachesForMonth(billingMonth, billingYear) {
       const status = data[i][4] || 'M';
 
       if (!playerName || !clinic) continue;
-      if (rowDate.getMonth() + 1 !== billingMonth || rowDate.getFullYear() !== billingYear) continue;
+      if (!billedIn(rowDate, billingMonth, billingYear)) continue;
 
       // Marker rows (session with nobody / cancelled): keep for the A/S
       // session diary, but exclude from revenue and staffing entirely
@@ -706,17 +797,32 @@ function applySiblingDiscounts(rows, overrides) {
 }
 
 // Builds discounted billing rows for one clinic from raw player data.
-// players: [{ name, status ('M'|'G'|'S'), sessions }]
+// players: [{ name, status ('M'|'G'|'S'), sessions,
+//             moved, prevSessions, prevStatus }]  - the last three only for a
+//             kid with a Wednesday moved in from last month (markMovedIn)
 // Returns { rows, gross, totalDiscount, net } - rows sorted by name.
 function buildClinicBillingRows(clinic, players, overrides) {
   const rows = [];
   for (const p of players) {
-    const total = getTotalCharge(clinic, p.status, p.sessions);
+    let total = getTotalCharge(clinic, p.status, p.sessions);
+    let moveNote = '';
+    if (p.moved > 0) {
+      // The moved Wednesday is priced as part of the month it happened in:
+      // this month's own sessions at this month's price, plus what the
+      // Wednesday would have added to last month. So a family that had earned
+      // its free session there still gets it, and nobody pays more or less.
+      const here = total - getTotalCharge(clinic, p.status, p.sessions - p.moved);
+      const there = movedSessionCharge(clinic, p.prevStatus || p.status, p.prevSessions || 0, p.moved);
+      total = total - here + there;
+      moveNote = 'Includes last month\'s final Wednesday at $' + there.toFixed(2) +
+        (there === 0 ? ' - it would have been their free clinic.' : '.');
+    }
     rows.push({
       name: p.name,
       status: p.status === 'G' ? 'Guest' : p.status === 'S' ? 'Social' : 'Member',
       sessions: p.sessions,
       total: total,
+      moveNote: moveNote,
       lastName: p.name.split(',')[0].trim()
     });
   }
@@ -1140,15 +1246,18 @@ function generateMonthlyBilling(monthOverride, yearOverride, onlyClinic) {
     if (!clinicData[row.clinic]) clinicData[row.clinic] = {};
     const cd = clinicData[row.clinic];
     if (!cd[row.playerName]) {
-      cd[row.playerName] = { name: row.playerName, status: row.status, sessions: 0 };
+      cd[row.playerName] = { name: row.playerName, status: row.status, sessions: 0, movedIn: 0 };
     }
     cd[row.playerName].sessions++;
+    if (row.moved) cd[row.playerName].movedIn++;       // last month's final Wednesday
   }
 
+  const prevBilled = previousMonthBilled(billingMonth, billingYear);
   for (const clinic in clinicData) {
     for (const key in clinicData[clinic]) {
       const p = clinicData[clinic][key];
       p.status = resolvePlayerStatus(statusOverrides, clinic, p.name, p.status);
+      markMovedIn(p, clinic, p.movedIn, prevBilled);
     }
   }
 
@@ -1217,7 +1326,7 @@ function generateMonthlyBilling(monthOverride, yearOverride, onlyClinic) {
         row.finalTotal,
         prev.charged === true,
         prev.charged === true ? (prev.chargedOn || new Date()) : '',
-        row.siblingNote
+        [row.siblingNote, row.moveNote].filter(String).join(' ')
       ]);
     }
 
@@ -1266,6 +1375,118 @@ function generateMonthlyBilling(monthOverride, yearOverride, onlyClinic) {
       ' players, gross $' + billing.gross + ', discounts $' + billing.totalDiscount +
       ', net $' + billing.net);
   }
+}
+
+// ---- Month-End Wednesday report ------------------------------------------
+// For a month that ended on a Wednesday (month 1-12): one tab listing every
+// kid who came that Wednesday, what it costs them and why. The same charge
+// is on the next month's bills (see buildClinicBillingRows), so this is the
+// explanation, not a second list to charge from. Returns the tab name.
+function generateWednesdayReport(month, year) {
+  const lastDay = new Date(year, month, 0);
+  const label = (lastDay.getMonth() + 1) + '/' + lastDay.getDate() + '/' + lastDay.getFullYear();
+  if (!isWednesdayMonthEnd(lastDay)) {
+    throw new Error(MONTH_NAMES_FULL[month - 1] + ' ' + year + ' did not end on a Wednesday.');
+  }
+  const next = new Date(year, month, 1);
+  const nm = next.getMonth() + 1, ny = next.getFullYear();
+  const monthName = MONTH_NAMES_FULL[month - 1] + ' ' + year;
+  const nextName = MONTH_NAMES_FULL[nm - 1] + ' ' + ny;
+
+  // Who came that Wednesday - read exactly the way the next month's billing
+  // reads it, one per kid per clinic
+  const seen = {}, kids = [];
+  for (const r of getAttendanceForMonth(nm, ny)) {
+    if (!r.moved) continue;
+    const k = r.clinic + '|||' + String(r.playerName).trim().toLowerCase();
+    if (seen[k]) continue;
+    seen[k] = true;
+    kids.push({ clinic: String(r.clinic).trim(), name: String(r.playerName).trim() });
+  }
+
+  const prevBilled = previousMonthBilled(nm, ny) || {};
+  const billing = SpreadsheetApp.openById(BILLING_SHEET_ID);
+  const monthCharges = {};                   // what each kid was billed that month, per clinic
+  const chargesFor = (clinic) => {
+    if (monthCharges[clinic]) return monthCharges[clinic];
+    const out = monthCharges[clinic] = {};
+    const tab = billing.getSheetByName(clinic + ' - Billing - ' + monthName);
+    if (!tab) return out;
+    const data = tab.getDataRange().getValues();
+    const iF = data[0].indexOf('Final Charge'), iS = data[0].indexOf('Sessions');
+    for (let i = 1; i < data.length; i++) {
+      if (iS !== -1 && typeof data[i][iS] !== 'number') continue;
+      out[(data[i][0] || '').toString().trim().toLowerCase()] = data[i][iF];
+    }
+    return out;
+  };
+
+  const rank = (c) => { const i = CLINIC_DISPLAY_ORDER.indexOf(c); return i === -1 ? 99 : i; };
+  kids.sort((a, b) => (rank(a.clinic) - rank(b.clinic)) || a.name.localeCompare(b.name));
+  const rows = kids.map(kid => {
+    const prev = prevBilled[kid.clinic + '|||' + kid.name.toLowerCase()] || { sessions: 0, status: 'M' };
+    const charge = movedSessionCharge(kid.clinic, prev.status, prev.sessions, 1);
+    const billed = chargesFor(kid.clinic)[kid.name.toLowerCase()];
+    return [kid.name, kid.clinic, statusLabel(prev.status), prev.sessions, prev.sessions + 1,
+            charge === 0 ? 'YES' : 'No', charge, typeof billed === 'number' ? billed : 'not billed yet'];
+  });
+
+  const tabName = 'Month-End Wednesday - ' + monthName;
+  let sheet = billing.getSheetByName(tabName);
+  if (sheet) billing.deleteSheet(sheet);
+  sheet = billing.insertSheet(tabName);
+  const headers = ['Player', 'Clinic', 'Status', monthName.split(' ')[0] + ' sessions',
+    label + ' is session #', 'Free clinic?', 'Charge for ' + label, monthName.split(' ')[0] + ' bill'];
+  const W = headers.length;
+  sheet.getRange(1, 1).setValue('Wed ' + label + ' is billed on the ' + nextName + ' bills, priced as part of ' +
+    monthName + ': free if it would have been that month\'s free clinic. These charges are already on the ' +
+    nextName + ' billing tabs.');
+  sheet.getRange(1, 1, 1, W).merge().setWrap(true).setFontWeight('bold').setFontColor('#021f3d')
+    .setBackground('#eef1f7').setVerticalAlignment('middle');
+  sheet.setRowHeight(1, 44);
+  sheet.getRange(3, 1, 1, W).setValues([headers])
+    .setFontWeight('bold').setBackground('#021f3d').setFontColor('white');
+  if (rows.length) {
+    sheet.getRange(4, 1, rows.length, W).setValues(rows);
+    sheet.getRange(4, 7, rows.length, 2).setNumberFormat('$#,##0.00');
+    rows.forEach((r, i) => {
+      if (r[5] === 'YES') sheet.getRange(4 + i, 6).setFontColor('#2e7d32').setFontWeight('bold');
+    });
+  }
+  const free = rows.filter(r => r[5] === 'YES').length;
+  const total = rows.reduce((s, r) => s + r[6], 0);
+  const sum = 5 + rows.length;
+  sheet.getRange(sum, 1, 3, 2).setValues([
+    ['Kids that day:', rows.length], ['Free clinics kept:', free], ['Total charged for ' + label + ':', total]]);
+  sheet.getRange(sum + 2, 2).setNumberFormat('$#,##0.00');
+  sheet.getRange(sum, 1, 3, 1).setFontWeight('bold');
+  [200, 130, 80, 120, 140, 100, 140, 120].forEach((w, i) => sheet.setColumnWidth(i + 1, w));
+  sheet.setFrozenRows(3);
+  Logger.log(tabName + ': ' + rows.length + ' kids, ' + free + ' free, $' + total.toFixed(2));
+  return { tab: tabName, kids: rows.length, free: free, total: total, label: label, nextName: nextName };
+}
+
+// Menu: the report for the month that just ended on a Wednesday - this month
+// if today is that Wednesday or later, otherwise last month.
+function menuWednesdayReport() {
+  const ui = SpreadsheetApp.getUi();
+  const now = new Date();
+  const thisEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+  const lastEnd = new Date(now.getFullYear(), now.getMonth(), 0);
+  const target = isWednesdayMonthEnd(thisEnd) && now.getDate() === thisEnd.getDate() ? thisEnd
+               : isWednesdayMonthEnd(lastEnd) ? lastEnd : null;
+  if (!target) {
+    let d = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+    for (let i = 0; i < 60 && !isWednesdayMonthEnd(d); i++) d = new Date(d.getFullYear(), d.getMonth() + 2, 0);
+    ui.alert('No month has just ended on a Wednesday, so there is nothing to report.\n\n' +
+      'Next one: Wed ' + (d.getMonth() + 1) + '/' + d.getDate() + '/' + d.getFullYear() + '.');
+    return;
+  }
+  const r = generateWednesdayReport(target.getMonth() + 1, target.getFullYear());
+  ui.alert('"' + r.tab + '" is ready on the billing sheet.\n\n' +
+    r.kids + ' kid' + (r.kids !== 1 ? 's' : '') + ' came on ' + r.label + '. ' +
+    r.free + ' of them keep their free clinic. $' + r.total.toFixed(2) + ' in all, already on the ' +
+    r.nextName + ' bills.');
 }
 
 // Convenience function: generate billing for the current month
@@ -2360,6 +2581,7 @@ function generateAttendanceSummary(monthOverride, yearOverride) {
   const monthName = new Date(billingYear, billingMonth - 1, 1)
     .toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
   const statusOverrides = getStatusOverrides(monthName);   // Lisa's Member/Guest corrections
+  const prevBilled = previousMonthBilled(billingMonth, billingYear);   // a moved-in Wednesday
 
   const attendanceRows = getAttendanceForMonth(billingMonth, billingYear);
   if (attendanceRows.length === 0) {
@@ -2455,12 +2677,12 @@ function generateAttendanceSummary(monthOverride, yearOverride) {
         playerSessions[player] = (playerSessions[player] || 0) + 1;
       }
     }
-    const revBilling = buildClinicBillingRows(clinic,
+    const revBilling = buildClinicBillingRows(clinic, markMovedInFromDates(
       Object.keys(playerSessions).map(p => ({
         name: p,
         status: resolvePlayerStatus(statusOverrides, clinic, p, cd.playerStatus[p]),
         sessions: playerSessions[p]
-      })),
+      })), clinic, cd.dates, billingMonth, billingYear, prevBilled),
       getSiblingOverrides());
     const clinicRevenue = revBilling.net;
 
@@ -2512,6 +2734,7 @@ function generateAttendanceAndStaffingSummary(monthOverride, yearOverride) {
   const monthName = new Date(billingYear, billingMonth - 1, 1)
     .toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
   const statusOverrides = getStatusOverrides(monthName);   // Lisa's Member/Guest corrections
+  const prevBilled = previousMonthBilled(billingMonth, billingYear);   // a moved-in Wednesday
 
   // Get attendance data WITH coaches and no-attendee/cancelled markers
   const { rows: attendanceRows, sessionCoaches, sessionMarkers } =
@@ -2685,12 +2908,12 @@ function generateAttendanceAndStaffingSummary(monthOverride, yearOverride) {
       }
     }
 
-    const revBilling = buildClinicBillingRows(clinic,
+    const revBilling = buildClinicBillingRows(clinic, markMovedInFromDates(
       Object.keys(playerSessions).map(p => ({
         name: p,
         status: resolvePlayerStatus(statusOverrides, clinic, p, cd.playerStatus[p]),
         sessions: playerSessions[p]
-      })),
+      })), clinic, cd.dates, billingMonth, billingYear, prevBilled),
       siblingOverrides);
     const totalRevenue = revBilling.net;
     const revenueStartRow = currentRow;
@@ -2818,6 +3041,7 @@ function generateMasterASSummary(monthOverride, yearOverride) {
   const monthName = new Date(billingYear, billingMonth - 1, 1)
     .toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
   const statusOverrides = getStatusOverrides(monthName);   // Lisa's Member/Guest corrections
+  const prevBilled = previousMonthBilled(billingMonth, billingYear);   // a moved-in Wednesday
 
   const { rows: attendanceRows, sessionCoaches, sessionMarkers } =
     getAttendanceWithCoachesForMonth(billingMonth, billingYear);
@@ -2877,10 +3101,10 @@ function generateMasterASSummary(monthOverride, yearOverride) {
     for (const dateStr in cd.dates) {
       for (const p of cd.dates[dateStr]) playerSessions[p] = (playerSessions[p] || 0) + 1;
     }
-    const billing = buildClinicBillingRows(clinic,
+    const billing = buildClinicBillingRows(clinic, markMovedInFromDates(
       Object.keys(playerSessions).map(p => ({
         name: p, status: resolvePlayerStatus(statusOverrides, clinic, p, cd.playerStatus[p]), sessions: playerSessions[p]
-      })), siblingOverrides);
+      })), clinic, cd.dates, billingMonth, billingYear, prevBilled), siblingOverrides);
 
     // Staffing cost from actual recorded hours
     let staffing = 0;
@@ -3125,7 +3349,8 @@ function reportTabMonth(name) {
   if (name.indexOf(' - Billing - ') === -1 &&
       name.indexOf(' - A/S Summary - ') === -1 &&
       name.indexOf(' - Attendance - ') === -1 &&
-      name.indexOf('MASTER Summary - ') !== 0) return null;
+      name.indexOf('MASTER Summary - ') !== 0 &&
+      name.indexOf('Month-End Wednesday - ') !== 0) return null;
   return { month: idx + 1, year: parseInt(m[2], 10) };
 }
 
@@ -3270,6 +3495,7 @@ function onOpen() {
     .addSeparator()
     .addItem('Generate Last Month - Billing Only', 'menuLastMonthBilling')
     .addItem('Generate Last Month - A/S Summary Only', 'menuLastMonthAS')
+    .addItem('Month-End Wednesday Report', 'menuWednesdayReport')
     .addSeparator()
     .addItem('Update Families List', 'menuUpdateFamilies')
     .addItem('Sync Contacts from Sign-Up Sheet', 'menuSyncContacts')
