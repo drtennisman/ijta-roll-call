@@ -492,6 +492,11 @@
             border-color: #021f3d;
         }
 
+        .add-player-type.needs-choice {
+            border-color: #c62828;
+            background-color: #ffebee;
+        }
+
         .add-player-input {
             flex-grow: 1;
             padding: 12px 14px;
@@ -781,9 +786,10 @@
 
             <div class="add-player-bar">
                 <input type="text" id="add-player-input" class="add-player-input" placeholder="Last, First (e.g. Smith, John)">
-                <select id="add-player-type" class="add-player-type">
-                    <option value="G">Guest</option>
+                <select id="add-player-type" class="add-player-type" onchange="this.classList.remove('needs-choice')">
+                    <option value="" selected disabled>M or G?</option>
                     <option value="M">Member</option>
+                    <option value="G">Guest</option>
                     <option value="S">Social</option>
                 </select>
                 <button class="add-player-btn" onclick="addPlayer()">+ Add</button>
@@ -1491,6 +1497,16 @@
 
             if (!name) return;
 
+            // The coach has to choose. This used to default to Guest, and a kid
+            // added in a hurry stayed a Guest on the roster every month after.
+            const typeSelect = document.getElementById('add-player-type');
+            const status = typeSelect.value;
+            if (!status) {
+                typeSelect.classList.add('needs-choice');
+                typeSelect.focus();
+                return;
+            }
+
             const container = document.getElementById('players-list');
 
             // Remove the "no players" message if present
@@ -1499,11 +1515,11 @@
                 container.innerHTML = '';
             }
 
-            // Use the selected type (Member or Guest)
-            const status = document.getElementById('add-player-type').value;
             addPlayerToList(container, name, status, true);
 
             input.value = '';
+            typeSelect.selectedIndex = 0;     // back to "M or G?" for the next kid
+            typeSelect.classList.remove('needs-choice');
             updatePlayerCounter();
             updateSubmitButton();
 

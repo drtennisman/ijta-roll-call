@@ -1108,13 +1108,16 @@ function getTotalCharge(clinic, status, sessions) {
   return lookup[lastIndex] + (extraSessions * rate[s]);
 }
 
-function generateMonthlyBilling(monthOverride, yearOverride) {
+// onlyClinic: rebuild just that clinic's tab (used when a status is corrected
+// from the Collections sheet); every clinic when left out.
+function generateMonthlyBilling(monthOverride, yearOverride, onlyClinic) {
   const now = new Date();
   const billingMonth = monthOverride || now.getMonth() + 1;
   const billingYear = yearOverride || now.getFullYear();
 
   const monthName = new Date(billingYear, billingMonth - 1, 1)
     .toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+  const statusOverrides = getStatusOverrides(monthName);   // Lisa's Member/Guest corrections
 
   const attendanceRows = getAttendanceForMonth(billingMonth, billingYear);
   if (attendanceRows.length === 0) {
@@ -1142,11 +1145,21 @@ function generateMonthlyBilling(monthOverride, yearOverride) {
     cd[row.playerName].sessions++;
   }
 
-  updateFamiliesList();  // self-fill the Families tab before applying discounts
+  for (const clinic in clinicData) {
+    for (const key in clinicData[clinic]) {
+      const p = clinicData[clinic][key];
+      p.status = resolvePlayerStatus(statusOverrides, clinic, p.name, p.status);
+    }
+  }
+
+  // Self-fill the Families tab before applying discounts. A single-clinic
+  // rebuild uses the tab as it stands, to keep a status change quick.
+  if (!onlyClinic) updateFamiliesList();
   const billingSS = SpreadsheetApp.openById(BILLING_SHEET_ID);
   const siblingOverrides = getSiblingOverrides();
 
   for (const clinic in clinicData) {
+    if (onlyClinic && clinic !== onlyClinic) continue;
     const playerMap = clinicData[clinic];
 
     // Build billing rows with sibling discounts applied automatically
@@ -1211,7 +1224,13 @@ function generateMonthlyBilling(monthOverride, yearOverride) {
     // Checkboxes, formats, and sibling highlights
     if (billingRows.length > 0) {
       const col = (name) => headers.indexOf(name) + 1;
-      sheet.getRange(2, col('Charged?'), billingRows.length, 1).insertCheckboxes();
+      const chargedRange = sheet.getRange(2, col('Charged?'), billingRows.length, 1);
+      chargedRange.insertCheckboxes();
+      // insertCheckboxes() sets every cell it touches to FALSE, which would
+      // untick every family already charged each time a month is regenerated.
+      // Put the ticks carried over from the old tab back on.
+      chargedRange.setValues(billingRows.map(r =>
+        [(prevState[r.name.toLowerCase()] || {}).charged === true]));
       sheet.getRange(2, col('Total'), billingRows.length, 3).setNumberFormat('$#,##0.00');
       sheet.getRange(2, col('Charged On'), billingRows.length, 1).setNumberFormat('M/d/yyyy');
       for (let i = 0; i < billingRows.length; i++) {
@@ -1288,18 +1307,19 @@ const BILLING_AGING_DAYS = 14;
 // family (who to text, what they owe in total, and the follow-up so far), then
 // one row per month per clinic underneath, each with its own Paid box.
 //
-//   Family row: Family | Phone |       |        |         | Owed (total) |      | Outreach | Last Contact | Notes
-//   Month row:         |       | Month | Clinic | Players | Owed         | Paid |
+//   Family row: Family | Phone |       |        |         |        | Owed (total) |      | Outreach | Last Contact | Notes
+//   Month row:         |       | Month | Clinic | Players | Status | Owed         | Paid |
 //
 // Families are ordered by what they owe, most first. Outreach / Last Contact /
 // Notes belong to the shop manager and are carried across every refresh.
-// Ticking Paid ticks Charged? on the billing tab (see onCollectionsEdit).
+// Ticking Paid ticks Charged? on the billing tab, and changing Status re-prices
+// that month (see onCollectionsEdit).
 // The hidden Key column is how the script tells the two kinds of row apart and
 // which billing tab and players a Paid box belongs to - nobody needs to see it.
 const COLLECTIONS_HEADERS = ['Family', 'Phone', 'Month', 'Clinic', 'Players',
-  'Owed', 'Paid', 'Outreach', 'Last Contact', 'Notes', 'Key'];
-const COLL_COL = { family: 1, phone: 2, month: 3, clinic: 4, players: 5, owed: 6,
-                   paid: 7, outreach: 8, last: 9, notes: 10, key: 11 };
+  'Status', 'Owed', 'Paid', 'Outreach', 'Last Contact', 'Notes', 'Key'];
+const COLL_COL = { family: 1, phone: 2, month: 3, clinic: 4, players: 5, status: 6,
+                   owed: 7, paid: 8, outreach: 9, last: 10, notes: 11, key: 12 };
 
 // Attendance stores players as "Last, First". On this sheet they read the way
 // you would say them out loud on a call.
@@ -1388,6 +1408,7 @@ function refreshCollections(monthsBack) {
     if (data.length < 2) continue;
     const h = data[0];
     const iC = h.indexOf('Charged?'), iF = h.indexOf('Final Charge'), iS = h.indexOf('Sessions');
+    const iSt = h.indexOf('Status');
     if (iC === -1 || iF === -1 || iS === -1) continue;
 
     for (let i = 1; i < data.length; i++) {
@@ -1402,13 +1423,14 @@ function refreshCollections(monthsBack) {
       const key = collectionsKey(monthLabel, clinic, family);
       if (!lines[key]) {
         lines[key] = { month: monthLabel, monthDate: monthDate, clinic: clinic, family: family,
-                       phone: '', open: { players: [], raws: [], amount: 0 },
-                       done: { players: [], raws: [], amount: 0 } };
+                       phone: '', open: { players: [], raws: [], amount: 0, statuses: [] },
+                       done: { players: [], raws: [], amount: 0, statuses: [] } };
       }
       const part = data[i][iC] === true ? lines[key].done : lines[key].open;
       part.players.push(playerFullName(player));
       part.raws.push(player);
       part.amount += Number(data[i][iF]) || 0;
+      part.statuses.push(iSt === -1 ? 'M' : (statusCode(data[i][iSt]) || 'M'));
       if (!lines[key].phone && c.phone) lines[key].phone = c.phone;
     }
   }
@@ -1442,7 +1464,8 @@ function refreshCollections(monthsBack) {
     if (!f.phone && L.phone) f.phone = L.phone;
     if (!paid) f.owed += part.amount;
     f.lines.push({ family: L.family, month: L.month, monthDate: L.monthDate, clinic: L.clinic,
-                   players: part.players, raws: part.raws, amount: part.amount, paid: paid });
+                   players: part.players, raws: part.raws, amount: part.amount, paid: paid,
+                   statuses: part.statuses });
   }
 
   // --- Order: biggest balance first; each family's months oldest first ----
@@ -1470,7 +1493,7 @@ function refreshCollections(monthsBack) {
   const W = COLLECTIONS_HEADERS.length;
   sheet.getRange(1, 1, 1, W).setValues([COLLECTIONS_HEADERS])
     .setFontWeight('bold').setBackground('#021f3d').setFontColor('white');
-  [210, 120, 110, 130, 240, 90, 55, 120, 105, 300, 80]
+  [210, 120, 110, 130, 240, 85, 90, 55, 120, 105, 300, 80]
     .forEach((w, i) => sheet.setColumnWidth(i + 1, w));
   sheet.setFrozenRows(1);
   if (sheet.getName() !== 'Collections') sheet.setName('Collections');
@@ -1491,13 +1514,13 @@ function refreshCollections(monthsBack) {
       if (isEscalated) escalate++;
       if (!f.phone) noPhone++;
     }
-    out.push([f.family, f.phone, '', '', '', f.owed, '',
+    out.push([f.family, f.phone, '', '', '', '', f.owed, '',
               hist.outreach || '', hist.last || '', hist.notes || '', familyRowKey(f.family)]);
     famRows.push({ row: out.length + 1, owing: isOwing, escalate: isOwing && isEscalated,
                    noPhone: !f.phone });
     for (const l of f.lines) {
-      out.push(['', '', l.month, l.clinic, l.players.join(', '), l.amount, l.paid,
-                '', '', '', monthRowKey(l)]);
+      out.push(['', '', l.month, l.clinic, l.players.join(', '), statusCellLabel(l.statuses),
+                l.amount, l.paid, '', '', '', monthRowKey(l)]);
       monthRows.push({ row: out.length + 1, clinic: l.clinic, paid: l.paid });
     }
   }
@@ -1532,7 +1555,13 @@ function refreshCollections(monthsBack) {
   });
   monthRows.forEach(d => {
     sheet.getRange(d.row, COLL_COL.clinic).setBackground(CLINIC_TINT[d.clinic] || '#eceff1');
-    if (d.paid) sheet.getRange(d.row, 1, 1, W - 1).setFontColor('#9e9e9e');
+    if (d.paid) {
+      sheet.getRange(d.row, 1, 1, W - 1).setFontColor('#9e9e9e');
+    } else {
+      // A paid month has gone through Jonas, so only unpaid ones can be re-priced.
+      sheet.getRange(d.row, COLL_COL.status).setDataValidation(
+        SpreadsheetApp.newDataValidation().requireValueInList(STATUS_LABELS, true).build());
+    }
   });
 
   Logger.log('Collections: ' + owing + ' families owing $' + owedTotal.toFixed(2) +
@@ -1639,12 +1668,15 @@ function readCollectionsNotes(sheet) {
 //  - Outreach set on a family row: stamps Last Contact.
 //  - Paid ticked on a month row: ticks Charged? (and stamps Charged On) for
 //    those players on the matching billing tab. Unticking reverses it.
+//  - Status changed on a month row: re-prices that month (see
+//    changeCollectionsStatus).
 function onCollectionsEdit(e) {
   try {
     const sheet = e.range.getSheet();
     const h = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
     const oCol = h.indexOf('Outreach') + 1, lCol = h.indexOf('Last Contact') + 1;
     const pCol = h.indexOf('Paid') + 1, kCol = h.indexOf('Key') + 1;
+    const sCol = h.indexOf('Status') + 1, wCol = h.indexOf('Owed') + 1;
     const first = e.range.getColumn(), last = first + e.range.getNumColumns() - 1;
     const start = e.range.getRow(), n = e.range.getNumRows();
     const touches = (c) => c > 0 && c >= first && c <= last;
@@ -1660,7 +1692,274 @@ function onCollectionsEdit(e) {
       }
     }
     if (touches(pCol) && kCol) syncCollectionsPaid(sheet, start, n, pCol, kCol);
+    if (touches(sCol) && kCol && pCol && wCol) {
+      changeCollectionsStatus(sheet, start, n,
+        { status: sCol, paid: pCol, key: kCol, owed: wCol }, e);
+    }
   } catch (err) { /* never break an edit */ }
+}
+
+// ---- Member / Guest corrections ------------------------------------------
+// Lisa can correct a kid's status from the Collections sheet. The correction
+// is NOT written into the Master Attendance sheet - the coaches' check-in rows
+// stay exactly as recorded. It goes on the "Status Changes" tab of the billing
+// spreadsheet (private; the roster sheet is readable by link), and every
+// report that turns status into dollars reads it: billing and the three
+// summaries. The roster is fixed as well, so check-ins from then on come in
+// right and later months need no correction at all.
+//
+// Where a month has no correction, a kid's FIRST check-in of the month decides.
+// Billing always worked that way; the summaries used to take the last one, so
+// the two could disagree about a kid whose badge changed mid-month.
+const STATUS_CHANGES_TAB = 'Status Changes';
+const STATUS_CHANGES_HEADERS = ['Player', 'Clinic', 'Month', 'New Status', 'Old Status',
+  'Old Charge', 'New Charge', 'Changed On', 'Changed By'];
+const STATUS_LABELS = ['Member', 'Guest', 'Social'];
+
+// 'M' | 'G' | 'S' from a letter or a word; '' when it is neither.
+function statusCode(v) {
+  const s = (v || '').toString().trim().toUpperCase();
+  if (s === 'M' || s === 'MEMBER') return 'M';
+  if (s === 'G' || s === 'GUEST') return 'G';
+  if (s === 'S' || s === 'SOCIAL') return 'S';
+  return '';
+}
+
+function statusLabel(code) {
+  return code === 'G' ? 'Guest' : code === 'S' ? 'Social' : 'Member';
+}
+
+// What the Status cell shows for a row of one or more siblings.
+function statusCellLabel(codes) {
+  const uniq = (codes || []).filter((c, i, a) => c && a.indexOf(c) === i);
+  if (uniq.length === 0) return '';
+  return uniq.length === 1 ? statusLabel(uniq[0]) : 'Mixed';
+}
+
+function statusOverrideKey(clinic, player) {
+  return (clinic || '').toString().trim().toLowerCase() + '|||' +
+         (player || '').toString().trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+// { 'clinic|||last, first': 'M'|'G'|'S' } for one month ("September 2026").
+// The tab is a log - a later row wins, so changing a kid back and forth
+// keeps every step and uses the latest.
+function getStatusOverrides(monthLabel) {
+  const out = {};
+  const sheet = SpreadsheetApp.openById(BILLING_SHEET_ID).getSheetByName(STATUS_CHANGES_TAB);
+  if (!sheet || sheet.getLastRow() < 2) return out;
+  const want = (monthLabel || '').toString().trim().toLowerCase();
+  const data = sheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (monthLabelOf(data[i][2]).toLowerCase() !== want) continue;
+    const code = statusCode(data[i][3]);
+    if (code) out[statusOverrideKey(data[i][1], data[i][0])] = code;
+  }
+  return out;
+}
+
+// A kid's status for one clinic-month: Lisa's correction if there is one,
+// otherwise what was recorded at check-in.
+function resolvePlayerStatus(overrides, clinic, player, recorded) {
+  return (overrides && overrides[statusOverrideKey(clinic, player)]) || recorded || 'M';
+}
+
+function statusChangesSheet(billing) {
+  let sheet = billing.getSheetByName(STATUS_CHANGES_TAB);
+  if (!sheet) {
+    sheet = billing.insertSheet(STATUS_CHANGES_TAB);
+    sheet.getRange(1, 1, 1, STATUS_CHANGES_HEADERS.length).setValues([STATUS_CHANGES_HEADERS])
+      .setFontWeight('bold').setBackground('#021f3d').setFontColor('white');
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+// Reads one billing tab as { 'last, first': { name, code, amount, charged } }.
+function readBillingPlayers(billing, tabName) {
+  const tab = billing.getSheetByName(tabName);
+  if (!tab) throw new Error('There is no billing tab called "' + tabName + '".');
+  const data = tab.getDataRange().getValues();
+  const h = data[0];
+  const iSt = h.indexOf('Status'), iF = h.indexOf('Final Charge'),
+        iC = h.indexOf('Charged?'), iS = h.indexOf('Sessions');
+  const out = {};
+  for (let i = 1; i < data.length; i++) {
+    if (iS !== -1 && typeof data[i][iS] !== 'number') continue;   // summary rows
+    const name = (data[i][0] || '').toString().trim();
+    if (!name) continue;
+    out[name.toLowerCase()] = { name: name, code: statusCode(data[i][iSt]) || 'M',
+      amount: Number(data[i][iF]) || 0, charged: iC !== -1 && data[i][iC] === true };
+  }
+  return out;
+}
+
+// Handles a change to the Status column. Each changed month row is re-priced;
+// anything that cannot be done is put back, with a note on the cell saying
+// why, so the sheet never shows a status that billing does not agree with.
+function changeCollectionsStatus(sheet, start, n, cols, e) {
+  const lock = LockService.getScriptLock();
+  const keys = sheet.getRange(start, cols.key, n, 1).getValues();
+  const vals = sheet.getRange(start, cols.status, n, 1).getValues();
+  const paid = sheet.getRange(start, cols.paid, n, 1).getValues();
+  let billing = null;
+  const current = (k) => {                  // what billing says right now
+    try {
+      const players = readBillingPlayers(billing, k.clinic + ' - Billing - ' + k.month);
+      return statusCellLabel(k.raws.map(r => (players[r.toLowerCase()] || {}).code));
+    } catch (err) { return ''; }
+  };
+
+  let locked = false;
+  try { locked = lock.tryLock(30000); } catch (err) { locked = false; }
+  try {
+    try { billing = SpreadsheetApp.openById(BILLING_SHEET_ID); } catch (err) { billing = null; }
+    let who = '';
+    try { who = (e && e.user && e.user.getEmail && e.user.getEmail()) || ''; } catch (err) { who = ''; }
+
+    const changedRows = [];
+    for (let i = 0; i < n; i++) {
+      const row = start + i;
+      if (row === 1) continue;
+      const k = parseCollectionsRowKey(keys[i][0]);
+      if (!k) continue;
+      const cell = sheet.getRange(row, cols.status);
+      if (k.type !== 'M') { cell.setValue(''); continue; }        // family rows have none
+      const putBack = (why) => {
+        cell.setValue(billing ? current(k) : '');
+        cell.setNote(why + ' Nothing was changed.');
+      };
+      if (!locked) { putBack('Another change was still being saved. Try again in a moment.'); continue; }
+      if (!billing) { putBack('Could not open the billing sheet.'); continue; }
+      if (paid[i][0] === true) {
+        putBack('This month is ticked Paid, so it has already been charged in Jonas. ' +
+          'Refund or charge the difference in Jonas instead.');
+        continue;
+      }
+      const code = statusCode(vals[i][0]);
+      if (!code) { putBack('Pick Member, Guest or Social.'); continue; }
+
+      let r;
+      try {
+        r = applyStatusChange(billing, k, code, who);
+      } catch (err) {
+        putBack(err.message);
+        continue;
+      }
+      cell.setValue(statusLabel(code));
+      if (r.unchanged) { cell.clearNote(); continue; }
+      const d = new Date();
+      cell.setNote((d.getMonth() + 1) + '/' + d.getDate() + ': ' + r.oldLabel + ' -> ' +
+        statusLabel(code) + ', $' + r.oldAmt.toFixed(2) + ' -> $' + r.newAmt.toFixed(2) + '.' + r.warn);
+      sheet.getRange(row, cols.owed).setValue(r.newAmt);
+      changedRows.push(row);
+    }
+    if (changedRows.length) updateCollectionsFamilyTotals(sheet, changedRows);
+  } finally {
+    if (locked) lock.releaseLock();
+  }
+}
+
+// Re-prices one Collections month row at a new status: logs the correction,
+// rebuilds that clinic's billing tab for that month (Charged? ticks are kept
+// by the rebuild), and fixes the roster for future check-ins. Throws with a
+// sentence the sheet can show if it cannot.
+function applyStatusChange(billing, k, code, who) {
+  const tabName = k.clinic + ' - Billing - ' + k.month;
+  const before = readBillingPlayers(billing, tabName);
+  const players = k.raws.map(r => before[r.toLowerCase()]);
+  const missing = k.raws.filter((r, i) => !players[i]);
+  if (missing.length) {
+    throw new Error('Could not find ' + missing.map(playerFullName).join(', ') +
+      ' on the "' + tabName + '" tab.');
+  }
+  if (players.some(p => p.charged)) {
+    throw new Error('Already charged on the billing sheet - refresh the Collections list.');
+  }
+  const oldAmt = players.reduce((s, p) => s + p.amount, 0);
+  const oldLabel = statusCellLabel(players.map(p => p.code));
+  if (players.every(p => p.code === code)) {
+    return { unchanged: true, oldLabel: oldLabel, oldAmt: oldAmt, newAmt: oldAmt, warn: '' };
+  }
+
+  const parts = k.month.split(' ');
+  const mIdx = MONTH_NAMES_FULL.indexOf(parts[0]);
+  const year = parseInt(parts[1], 10);
+  if (mIdx === -1 || !year) throw new Error('Could not read the month "' + k.month + '".');
+
+  // 1. Log it. The rebuild below reads this.
+  const log = statusChangesSheet(billing);
+  const first = log.getLastRow() + 1;
+  const now = new Date();
+  const rows = players.map(p => [p.name, k.clinic, k.month, statusLabel(code),
+    statusLabel(p.code), p.amount, '', now, who]);
+  const W = STATUS_CHANGES_HEADERS.length;
+  log.getRange(first, 3, rows.length, 1).setNumberFormat('@');    // before the value - see refreshCollections
+  log.getRange(first, 1, rows.length, W).setValues(rows);
+  log.getRange(first, 6, rows.length, 2).setNumberFormat('$#,##0.00');
+  log.getRange(first, 8, rows.length, 1).setNumberFormat('M/d/yyyy h:mm am/pm');
+
+  // 2. Rebuild just this clinic's billing tab for this month.
+  const chargedBefore = {};
+  for (const nm in before) if (before[nm].charged) chargedBefore[nm] = before[nm].amount;
+  try {
+    generateMonthlyBilling(mIdx + 1, year, k.clinic);
+  } catch (err) {
+    log.deleteRows(first, rows.length);     // a logged change that was never applied would re-price later
+    throw new Error('Could not rebuild the "' + tabName + '" tab (' + err.message + ').');
+  }
+  const after = readBillingPlayers(billing, tabName);
+  const amounts = k.raws.map(r => (after[r.toLowerCase()] || {}).amount || 0);
+  log.getRange(first, 7, rows.length, 1).setValues(amounts.map(a => [a]));
+  const newAmt = amounts.reduce((s, a) => s + a, 0);
+
+  // 3. Fix the roster so the app shows the right badge from now on.
+  let warn = '';
+  try {
+    updateRosterStatus(k.raws, code);
+  } catch (err) {
+    warn += ' The roster could not be updated (' + err.message + ') - change it there by hand.';
+  }
+
+  // A sibling discount can move between kids when one of them changes price.
+  // If it moved onto a kid who was already charged, Jonas needs a look.
+  const moved = [];
+  for (const nm in chargedBefore) {
+    const a = after[nm];
+    if (a && Math.round(a.amount * 100) !== Math.round(chargedBefore[nm] * 100)) {
+      moved.push(playerFullName(a.name) + ' ($' + chargedBefore[nm].toFixed(2) + ' -> $' + a.amount.toFixed(2) + ')');
+    }
+  }
+  if (moved.length) {
+    warn += ' Heads up: the sibling discount changed for ' + moved.join(', ') +
+      ', who was already charged - check Jonas.';
+  }
+  return { unchanged: false, oldLabel: oldLabel, oldAmt: oldAmt, newAmt: newAmt, warn: warn };
+}
+
+// Sets a kid's status on every clinic roster tab they appear on - membership
+// belongs to the family, not to one clinic. Returns how many rows changed.
+function updateRosterStatus(raws, code) {
+  const want = raws.map(r => r.toString().trim().replace(/\s+/g, ' ').toLowerCase());
+  const ss = SpreadsheetApp.openById(ROSTER_SHEET_ID);
+  let changed = 0;
+  for (const tabName of CLINIC_ROSTER_TABS) {
+    const sheet = ss.getSheetByName(tabName);
+    if (!sheet || sheet.getLastRow() < 2) continue;
+    const data = sheet.getDataRange().getValues();
+    const iSt = data[0].map(v => (v || '').toString().trim().toLowerCase()).indexOf('status');
+    const col = iSt === -1 ? 3 : iSt + 1;
+    for (let i = 1; i < data.length; i++) {
+      const last = (data[i][0] || '').toString().trim();
+      const firstName = (data[i][1] || '').toString().trim();
+      const full = (firstName ? last + ', ' + firstName : last).replace(/\s+/g, ' ').toLowerCase();
+      if (!full || want.indexOf(full) === -1) continue;
+      if (statusCode(data[i][col - 1]) === code) continue;
+      sheet.getRange(i + 1, col).setValue(code);
+      changed++;
+    }
+  }
+  return changed;
 }
 
 // Pushes Paid ticks from the Collections sheet to the billing tabs. If a tick
@@ -1944,6 +2243,7 @@ function generateAttendanceSummary(monthOverride, yearOverride) {
 
   const monthName = new Date(billingYear, billingMonth - 1, 1)
     .toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+  const statusOverrides = getStatusOverrides(monthName);   // Lisa's Member/Guest corrections
 
   const attendanceRows = getAttendanceForMonth(billingMonth, billingYear);
   if (attendanceRows.length === 0) {
@@ -1968,7 +2268,9 @@ function generateAttendanceSummary(monthOverride, yearOverride) {
     if (clinicData[row.clinic].dates[dateStr].indexOf(row.playerName) === -1) {
       clinicData[row.clinic].dates[dateStr].push(row.playerName);
     }
-    clinicData[row.clinic].playerStatus[row.playerName] = row.status;
+    if (!(row.playerName in clinicData[row.clinic].playerStatus)) {
+      clinicData[row.clinic].playerStatus[row.playerName] = row.status;   // first check-in wins
+    }
   }
 
   // Write to billing spreadsheet
@@ -2040,7 +2342,7 @@ function generateAttendanceSummary(monthOverride, yearOverride) {
     const revBilling = buildClinicBillingRows(clinic,
       Object.keys(playerSessions).map(p => ({
         name: p,
-        status: cd.playerStatus[p] || 'M',
+        status: resolvePlayerStatus(statusOverrides, clinic, p, cd.playerStatus[p]),
         sessions: playerSessions[p]
       })),
       getSiblingOverrides());
@@ -2093,6 +2395,7 @@ function generateAttendanceAndStaffingSummary(monthOverride, yearOverride) {
 
   const monthName = new Date(billingYear, billingMonth - 1, 1)
     .toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+  const statusOverrides = getStatusOverrides(monthName);   // Lisa's Member/Guest corrections
 
   // Get attendance data WITH coaches and no-attendee/cancelled markers
   const { rows: attendanceRows, sessionCoaches, sessionMarkers } =
@@ -2132,7 +2435,7 @@ function generateAttendanceAndStaffingSummary(monthOverride, yearOverride) {
     if (cd.dates[dateStr].indexOf(row.playerName) === -1) {
       cd.dates[dateStr].push(row.playerName);
     }
-    cd.playerStatus[row.playerName] = row.status;
+    if (!(row.playerName in cd.playerStatus)) cd.playerStatus[row.playerName] = row.status;   // first check-in wins
 
     // Map coaches to this clinic+date
     const sessionKey = dateStr + '|||' + row.clinic;
@@ -2269,7 +2572,7 @@ function generateAttendanceAndStaffingSummary(monthOverride, yearOverride) {
     const revBilling = buildClinicBillingRows(clinic,
       Object.keys(playerSessions).map(p => ({
         name: p,
-        status: cd.playerStatus[p] || 'M',
+        status: resolvePlayerStatus(statusOverrides, clinic, p, cd.playerStatus[p]),
         sessions: playerSessions[p]
       })),
       siblingOverrides);
@@ -2398,6 +2701,7 @@ function generateMasterASSummary(monthOverride, yearOverride) {
 
   const monthName = new Date(billingYear, billingMonth - 1, 1)
     .toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+  const statusOverrides = getStatusOverrides(monthName);   // Lisa's Member/Guest corrections
 
   const { rows: attendanceRows, sessionCoaches, sessionMarkers } =
     getAttendanceWithCoachesForMonth(billingMonth, billingYear);
@@ -2424,7 +2728,7 @@ function generateMasterASSummary(monthOverride, yearOverride) {
     const cd = ensure(row.clinic);
     if (!cd.dates[dateStr]) cd.dates[dateStr] = [];
     if (cd.dates[dateStr].indexOf(row.playerName) === -1) cd.dates[dateStr].push(row.playerName);
-    cd.playerStatus[row.playerName] = row.status;
+    if (!(row.playerName in cd.playerStatus)) cd.playerStatus[row.playerName] = row.status;   // first check-in wins
     const sessionKey = dateStr + '|||' + row.clinic;
     if (sessionCoaches[sessionKey]) cd.coachesByDate[dateStr] = sessionCoaches[sessionKey];
   }
@@ -2459,7 +2763,7 @@ function generateMasterASSummary(monthOverride, yearOverride) {
     }
     const billing = buildClinicBillingRows(clinic,
       Object.keys(playerSessions).map(p => ({
-        name: p, status: cd.playerStatus[p] || 'M', sessions: playerSessions[p]
+        name: p, status: resolvePlayerStatus(statusOverrides, clinic, p, cd.playerStatus[p]), sessions: playerSessions[p]
       })), siblingOverrides);
 
     // Staffing cost from actual recorded hours
