@@ -1509,6 +1509,12 @@ function refreshCollections(monthsBack) {
   // month band across the row, which would swallow a family row.
   whole.clearDataValidations();
   whole.breakApart();
+  // clear() leaves number formats behind as well. One cell carrying a stray
+  // "Plain text" format turned every FALSE written into that Paid checkbox
+  // into the text "false", so the box showed as invalid text on every
+  // refresh (Shepherd Wilson's July row, 9/28). Back to Automatic everywhere;
+  // the columns that need a format get it again below.
+  whole.setNumberFormat('General');
   const W = COLLECTIONS_HEADERS.length;
   sheet.getRange(1, 1, 1, W).setValues([COLLECTIONS_HEADERS])
     .setFontWeight('bold').setBackground('#021f3d').setFontColor('white')
