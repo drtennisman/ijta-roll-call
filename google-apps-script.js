@@ -1334,11 +1334,30 @@ function playerFullName(raw) {
 const CLINIC_DISPLAY_ORDER = ['Red Ball', 'Orange Ball', 'Green Ball',
   'MS Yellow Ball', 'HS Yellow Ball', 'Bruno'];
 
-// Colour per clinic so a family's months can be scanned at a glance.
-const CLINIC_TINT = {
-  'Red Ball': '#ffcdd2', 'Orange Ball': '#ffe0b2', 'Green Ball': '#c8e6c9',
-  'MS Yellow Ball': '#bbdefb', 'HS Yellow Ball': '#d1c4e9', 'Bruno': '#eceff1'
-};
+// How a family is labelled on the sheet. Families with no contact on file are
+// keyed "Walter (no contact)"; the Phone cell already says "no number", so
+// the name just reads "WALTER FAMILY".
+function familyDisplayName(family) {
+  const m = (family || '').toString().match(/^(.*) \(no contact\)$/);
+  return (m ? m[1] + ' family' : (family || '').toString()).toUpperCase();
+}
+
+// "2052403601" -> "205-240-3601": easier to read, still plain text to copy.
+// Anything that is not a 10-digit US number is left as it was.
+function prettyPhone(p) {
+  const raw = (p || '').toString().trim();
+  let d = raw.replace(/\D/g, '');
+  if (d.length === 11 && d.charAt(0) === '1') d = d.slice(1);
+  return d.length === 10 ? d.slice(0, 3) + '-' + d.slice(3, 6) + '-' + d.slice(6) : raw;
+}
+
+// "September 2026" -> "Sep 2026". Written as plain text like the long form,
+// so Sheets cannot turn it into a date.
+function shortMonthLabel(label) {
+  const parts = (label || '').toString().trim().split(' ');
+  return MONTH_NAMES_FULL.indexOf(parts[0]) === -1 || !parts[1]
+    ? (label || '').toString() : parts[0].slice(0, 3) + ' ' + parts[1];
+}
 
 // Clinics we do not collect money for. They still appear on the billing and
 // A/S reports - they are simply left off the Collections worklist, since
@@ -1492,10 +1511,14 @@ function refreshCollections(monthsBack) {
   whole.breakApart();
   const W = COLLECTIONS_HEADERS.length;
   sheet.getRange(1, 1, 1, W).setValues([COLLECTIONS_HEADERS])
-    .setFontWeight('bold').setBackground('#021f3d').setFontColor('white');
-  [210, 120, 110, 130, 240, 85, 90, 55, 120, 105, 300, 80]
+    .setFontWeight('bold').setBackground('#021f3d').setFontColor('white')
+    .setFontSize(10).setVerticalAlignment('middle');
+  sheet.setRowHeight(1, 28);
+  [230, 115, 80, 120, 210, 75, 85, 45, 115, 95, 280, 80]
     .forEach((w, i) => sheet.setColumnWidth(i + 1, w));
   sheet.setFrozenRows(1);
+  sheet.setFrozenColumns(1);          // the family name stays put when scrolling right
+  sheet.setHiddenGridlines(true);     // a line between families does the separating
   if (sheet.getName() !== 'Collections') sheet.setName('Collections');
 
   const out = [];          // values to write
@@ -1514,13 +1537,17 @@ function refreshCollections(monthsBack) {
       if (isEscalated) escalate++;
       if (!f.phone) noPhone++;
     }
-    out.push([f.family, f.phone, '', '', '', '', f.owed, '',
+    // What the cells SHOW is for reading; the hidden Key keeps the real family
+    // name, which is what outreach history and the Paid / Status edits go by.
+    out.push([familyDisplayName(f.family),
+              f.phone ? prettyPhone(f.phone) : (isOwing ? 'no number' : ''),
+              '', '', '', '', f.owed, '',
               hist.outreach || '', hist.last || '', hist.notes || '', familyRowKey(f.family)]);
     famRows.push({ row: out.length + 1, owing: isOwing, escalate: isOwing && isEscalated,
                    noPhone: !f.phone });
     for (const l of f.lines) {
-      out.push(['', '', l.month, l.clinic, l.players.join(', '), statusCellLabel(l.statuses),
-                l.amount, l.paid, '', '', '', monthRowKey(l)]);
+      out.push(['', '', shortMonthLabel(l.month), l.clinic, l.players.join(', '),
+                statusCellLabel(l.statuses), l.amount, l.paid, '', '', '', monthRowKey(l)]);
       monthRows.push({ row: out.length + 1, clinic: l.clinic, paid: l.paid });
     }
   }
@@ -1543,20 +1570,34 @@ function refreshCollections(monthsBack) {
   }
   sheet.hideColumns(COLL_COL.key);
 
+  // Layout: each family reads as one block. The family line carries the
+  // colour, weight and a navy rule above it; the months under it are plain,
+  // smaller and grey. Colour is kept for what needs attention - escalation,
+  // no phone number - and nothing else.
+  if (out.length > 0) {
+    sheet.getRange(2, 1, out.length, W - 1)
+      .setFontSize(10).setFontColor('#5f6368').setVerticalAlignment('middle');
+  }
   famRows.forEach(d => {
-    sheet.getRange(d.row, 1, 1, W - 1).setBackground(d.escalate ? '#ffebee' : '#e8eaf6')
-      .setFontColor(d.owing ? '#021f3d' : '#9e9e9e');
-    sheet.getRange(d.row, 1, 1, COLL_COL.owed).setFontWeight('bold');
-    if (d.owing && d.noPhone) sheet.getRange(d.row, COLL_COL.phone).setBackground('#ffcdd2');
+    sheet.getRange(d.row, 1, 1, W - 1)
+      .setBackground(d.escalate ? '#ffebee' : '#eef1f7')
+      .setFontColor(d.owing ? '#021f3d' : '#9e9e9e').setFontSize(11)
+      .setBorder(true, null, null, null, null, null, '#021f3d',
+                 SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+    sheet.getRange(d.row, COLL_COL.family).setFontWeight('bold');
+    sheet.getRange(d.row, COLL_COL.owed).setFontWeight('bold');
+    sheet.setRowHeight(d.row, 30);
+    if (d.owing && d.noPhone) {
+      sheet.getRange(d.row, COLL_COL.phone).setFontColor('#c62828').setFontStyle('italic');
+    }
     if (d.owing) {
       sheet.getRange(d.row, COLL_COL.outreach).setDataValidation(
         SpreadsheetApp.newDataValidation().requireValueInList(OUTREACH_LEVELS, true).build());
     }
   });
   monthRows.forEach(d => {
-    sheet.getRange(d.row, COLL_COL.clinic).setBackground(CLINIC_TINT[d.clinic] || '#eceff1');
     if (d.paid) {
-      sheet.getRange(d.row, 1, 1, W - 1).setFontColor('#9e9e9e');
+      sheet.getRange(d.row, 1, 1, W - 1).setFontColor('#b0b0b0');
     } else {
       // A paid month has gone through Jonas, so only unpaid ones can be re-priced.
       sheet.getRange(d.row, COLL_COL.status).setDataValidation(
