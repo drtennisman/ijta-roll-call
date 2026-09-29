@@ -1369,13 +1369,15 @@ function collectionsSkips(clinic) {
   return COLLECTIONS_SKIP_CLINICS.some(x => x.toLowerCase() === c);
 }
 
-// Hidden Key column. A family row is "F|||<family>"; a month row is
+// Hidden Key column. A family row is "F|||<family>", plus "|||<phone>" when
+// someone typed a number for that family on this sheet (see
+// keepCollectionsPhone); a month row is
 // "M|||<family>|||<month>|||<clinic>|||<Last, First>;;<Last, First>" - the
 // players exactly as the billing tab spells them, so a Paid tick can find them.
 const COLL_KEY_SEP = '|||';
 
-function familyRowKey(family) {
-  return 'F' + COLL_KEY_SEP + family;
+function familyRowKey(family, typedPhone) {
+  return 'F' + COLL_KEY_SEP + family + (typedPhone ? COLL_KEY_SEP + typedPhone : '');
 }
 
 function monthRowKey(line) {
@@ -1384,7 +1386,7 @@ function monthRowKey(line) {
 
 function parseCollectionsRowKey(v) {
   const parts = (v || '').toString().split(COLL_KEY_SEP);
-  if (parts[0] === 'F' && parts[1]) return { type: 'F', family: parts[1] };
+  if (parts[0] === 'F' && parts[1]) return { type: 'F', family: parts[1], phone: parts[2] || '' };
   if (parts[0] === 'M' && parts.length >= 4) {
     return { type: 'M', family: parts[1], month: parts[2], clinic: parts[3],
              raws: (parts[4] || '').split(';;').filter(String) };
@@ -1536,21 +1538,24 @@ function refreshCollections(monthsBack) {
     const hist = history(f.family);
     const isOwing = cents(f.owed) > 0;
     const isEscalated = OUTREACH_ESCALATE.indexOf(hist.outreach || '') !== -1;
+    // A number typed on this sheet beats the one on file.
+    const phone = hist.phone || f.phone;
     if (isOwing) {
       owing++;
       owedTotal += f.owed;
       if (!hist.outreach) notContacted++;
       if (isEscalated) escalate++;
-      if (!f.phone) noPhone++;
+      if (!phone) noPhone++;
     }
     // What the cells SHOW is for reading; the hidden Key keeps the real family
     // name, which is what outreach history and the Paid / Status edits go by.
     out.push([familyDisplayName(f.family),
-              f.phone ? prettyPhone(f.phone) : (isOwing ? 'no number' : ''),
+              phone ? prettyPhone(phone) : (isOwing ? 'no number' : ''),
               '', '', '', '', f.owed, '',
-              hist.outreach || '', hist.last || '', hist.notes || '', familyRowKey(f.family)]);
+              hist.outreach || '', hist.last || '', hist.notes || '',
+              familyRowKey(f.family, hist.phone)]);
     famRows.push({ row: out.length + 1, owing: isOwing, escalate: isOwing && isEscalated,
-                   noPhone: !f.phone });
+                   noPhone: !phone });
     for (const l of f.lines) {
       out.push(['', '', shortMonthLabel(l.month), l.clinic, l.players.join(', '),
                 statusCellLabel(l.statuses), l.amount, l.paid, '', '', '', monthRowKey(l)]);
@@ -1650,7 +1655,7 @@ function monthLabelOfDate(d) {
 }
 
 // Reads back everything a refresh must not clobber:
-//   families - outreach / last contact / notes, by family
+//   families - outreach / last contact / notes / a typed phone, by family
 //   lines    - whether each month row was ticked Paid, by month|||clinic|||family
 // Understands the current family-grouped layout and the older layouts that
 // had one row per month per clinic with follow-up on every row. When an older
@@ -1668,7 +1673,8 @@ function readCollectionsNotes(sheet) {
   const noteLists = {};
   const addHistory = (family, row) => {
     const k = family.toLowerCase();
-    const f = kept.families[k] || (kept.families[k] = { family: family, outreach: '', last: '', notes: '' });
+    const f = kept.families[k] ||
+      (kept.families[k] = { family: family, outreach: '', last: '', notes: '', phone: '' });
     const outreach = text(row, iOut);
     if (outreach && (!f.outreach ||
         OUTREACH_LEVELS.indexOf(outreach) > OUTREACH_LEVELS.indexOf(f.outreach))) {
@@ -1690,7 +1696,10 @@ function readCollectionsNotes(sheet) {
     for (let i = 1; i < data.length; i++) {
       const k = parseCollectionsRowKey(data[i][iKey]);
       if (!k) continue;
-      if (k.type === 'F') addHistory(k.family, data[i]);
+      if (k.type === 'F') {
+        addHistory(k.family, data[i]);
+        if (k.phone) kept.families[k.family.toLowerCase()].phone = k.phone;
+      }
       else kept.lines[collectionsKey(k.month, k.clinic, k.family)] =
         { paid: iPaid >= 0 && data[i][iPaid] === true };
     }
@@ -1717,6 +1726,7 @@ function readCollectionsNotes(sheet) {
 //    those players on the matching billing tab. Unticking reverses it.
 //  - Status changed on a month row: re-prices that month (see
 //    changeCollectionsStatus).
+//  - Phone typed on a family row: kept for that family (keepCollectionsPhone).
 function onCollectionsEdit(e) {
   try {
     const sheet = e.range.getSheet();
@@ -1743,7 +1753,66 @@ function onCollectionsEdit(e) {
       changeCollectionsStatus(sheet, start, n,
         { status: sCol, paid: pCol, key: kCol, owed: wCol }, e);
     }
+    const phCol = h.indexOf('Phone') + 1;
+    if (touches(phCol) && kCol) keepCollectionsPhone(sheet, start, n, { phone: phCol, key: kCol }, e);
   } catch (err) { /* never break an edit */ }
+}
+
+// ---- A phone number typed on a family line ---------------------------------
+// The Phone cell is redrawn on every refresh, so a number typed into it is
+// kept in that family line's hidden Key instead ("F|||Walter (no contact)|||
+// 205-555-7777"), and every refresh shows it in place of the number on file.
+// It only affects this sheet: the Contacts list is not touched. Clearing the
+// cell goes back to the number on file, if there is one.
+function keepCollectionsPhone(sheet, start, n, cols, e) {
+  const keys = sheet.getRange(start, cols.key, n, 1).getValues();
+  const vals = sheet.getRange(start, cols.phone, n, 1).getValues();
+  const single = n === 1 && e && e.range && e.range.getNumColumns() === 1;
+  const before = single && e.oldValue !== undefined ? e.oldValue : '';
+  const today = (new Date().getMonth() + 1) + '/' + new Date().getDate();
+
+  for (let i = 0; i < n; i++) {
+    const row = start + i;
+    if (row === 1) continue;
+    const k = parseCollectionsRowKey(keys[i][0]);
+    if (!k) continue;
+    const cell = sheet.getRange(row, cols.phone);
+    if (k.type !== 'F') {                                     // month lines have no phone
+      cell.setValue('');
+      cell.setNote('Type the number on the family line above.');
+      continue;
+    }
+    const keyCell = sheet.getRange(row, cols.key);
+    const typed = (vals[i][0] || '').toString().trim();
+
+    if (!typed || typed.toLowerCase() === 'no number') {
+      if (k.phone) {
+        keyCell.setValue(familyRowKey(k.family));             // forget the typed number
+        cell.setNote('Removed ' + k.phone + '. The next refresh shows the number on file, if there is one.');
+      } else {
+        cell.setValue(before);                                 // nothing typed to remove
+        cell.setNote('This number is the one on file, so it comes back on every refresh. ' +
+          'To use a different one, type it here.');
+      }
+      continue;
+    }
+
+    let digits = typed.replace(/\D/g, '');
+    if (digits.length === 11 && digits.charAt(0) === '1') digits = digits.slice(1);
+    if (digits.length !== 10) {
+      cell.setValue(before);
+      cell.setNote('"' + typed + '" is not a phone number - nothing was saved. ' +
+        'Type 10 digits, e.g. 205-555-1234.');
+      continue;
+    }
+    const pretty = prettyPhone(digits);
+    const was = k.phone || (before && before !== 'no number' ? before : '');
+    keyCell.setValue(familyRowKey(k.family, pretty));
+    cell.setValue(pretty);
+    cell.setFontColor('#021f3d').setFontStyle('normal');
+    cell.setNote('Typed on this sheet ' + today + (was && was !== pretty ? ' (was ' + was + ')' : '') +
+      '. Stays for this family on every refresh. Clear the cell to go back to the number on file.');
+  }
 }
 
 // ---- Member / Guest corrections ------------------------------------------
