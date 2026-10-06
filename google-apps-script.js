@@ -1280,8 +1280,9 @@ function generateMonthlyBilling(monthOverride, yearOverride, onlyClinic) {
     const tabName = clinic + ' - Billing - ' + monthName;
     let sheet = billingSS.getSheetByName(tabName);
 
-    // Preserve Charged?/Charged On from the existing tab so regenerating the
-    // report never loses which families have already been charged
+    // Preserve Charged?/Charged On and anything typed in Note from the
+    // existing tab, so regenerating the report never loses which families
+    // have been charged or what someone wrote beside a kid.
     const prevState = {};
     if (sheet) {
       const prevData = sheet.getDataRange().getValues();
@@ -1289,13 +1290,17 @@ function generateMonthlyBilling(monthOverride, yearOverride, onlyClinic) {
         const prevHeaders = prevData[0];
         const cCol = prevHeaders.indexOf('Charged?');
         const dCol = prevHeaders.indexOf('Charged On');
+        const nCol = prevHeaders.indexOf('Note');
         for (let i = 1; i < prevData.length; i++) {
           const pname = (prevData[i][0] || '').toString().trim().toLowerCase();
           if (!pname) continue;
-          if (cCol === -1 || prevData[i][cCol] !== true) continue;
+          const charged = cCol !== -1 && prevData[i][cCol] === true;
+          const note = nCol !== -1 ? typedBillingNote(prevData[i][nCol]) : '';
+          if (!charged && !note) continue;
           prevState[pname] = {
-            charged: true,
-            chargedOn: dCol !== -1 ? prevData[i][dCol] : ''
+            charged: charged,
+            chargedOn: charged && dCol !== -1 ? prevData[i][dCol] : '',
+            note: note
           };
         }
       }
@@ -1326,7 +1331,7 @@ function generateMonthlyBilling(monthOverride, yearOverride, onlyClinic) {
         row.finalTotal,
         prev.charged === true,
         prev.charged === true ? (prev.chargedOn || new Date()) : '',
-        [row.siblingNote, row.moveNote].filter(String).join(' ')
+        billingNote([row.siblingNote, row.moveNote], prev.note)
       ]);
     }
 
@@ -1489,6 +1494,27 @@ function menuWednesdayReport() {
     r.nextName + ' bills.');
 }
 
+// ---- The Note column on a billing tab --------------------------------------
+// It holds two things: the script's own notes (sibling discount, a moved-in
+// Wednesday), rebuilt on every regenerate, and whatever someone typed beside a
+// kid ("Jeff Liles - ICC Member"), which must survive one. They share the
+// cell as "<script notes> | <typed>".
+
+// What someone typed in a Note cell: the cell with the script's notes removed.
+function typedBillingNote(note) {
+  return (note || '').toString()
+    .replace(/SIBLING DISCOUNT \(-10%\)/g, '')
+    .replace(/Sibling - full price/g, '')
+    .replace(/Includes last month's final Wednesday at \$[0-9.,]+( - it would have been their free clinic)?\./g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s|]+|[\s|]+$/g, '');
+}
+
+function billingNote(scriptNotes, typed) {
+  const auto = scriptNotes.filter(String).join(' ');
+  return auto + (typed ? (auto ? ' | ' : '') + typed : '');
+}
+
 // Convenience function: generate billing for the current month
 function generateCurrentMonthBilling() {
   const now = new Date();
@@ -1549,6 +1575,15 @@ function playerFullName(raw) {
   if (s.indexOf(',') === -1) return s;
   const parts = s.split(',').map(x => x.trim()).filter(String);
   return (parts.length === 2 ? parts[1] + ' ' + parts[0] : parts.join(' ')).trim();
+}
+
+// One kid on a Collections month line: who, how many clinics, what it costs.
+// "Abby Walter - 4 clinics - $60.00". The Owed cell beside it is the total
+// for everyone on the line.
+function playerDetailLine(name, sessions, amount, discounted) {
+  const n = Number(sessions) || 0;
+  return name + ' - ' + n + (n === 1 ? ' clinic' : ' clinics') + ' - $' + amount.toFixed(2) +
+    (discounted ? ' (sibling discount)' : '');
 }
 
 // Clinics in the order they appear on every report: youngest to oldest.
@@ -1650,7 +1685,7 @@ function refreshCollections(monthsBack) {
     if (data.length < 2) continue;
     const h = data[0];
     const iC = h.indexOf('Charged?'), iF = h.indexOf('Final Charge'), iS = h.indexOf('Sessions');
-    const iSt = h.indexOf('Status');
+    const iSt = h.indexOf('Status'), iDisc = h.indexOf('Sibling Discount');
     if (iC === -1 || iF === -1 || iS === -1) continue;
 
     for (let i = 1; i < data.length; i++) {
@@ -1665,13 +1700,15 @@ function refreshCollections(monthsBack) {
       const key = collectionsKey(monthLabel, clinic, family);
       if (!lines[key]) {
         lines[key] = { month: monthLabel, monthDate: monthDate, clinic: clinic, family: family,
-                       phone: '', open: { players: [], raws: [], amount: 0, statuses: [] },
-                       done: { players: [], raws: [], amount: 0, statuses: [] } };
+                       phone: '', open: { players: [], raws: [], amount: 0, statuses: [], details: [] },
+                       done: { players: [], raws: [], amount: 0, statuses: [], details: [] } };
       }
       const part = data[i][iC] === true ? lines[key].done : lines[key].open;
       part.players.push(playerFullName(player));
       part.raws.push(player);
       part.amount += Number(data[i][iF]) || 0;
+      part.details.push(playerDetailLine(playerFullName(player), data[i][iS], Number(data[i][iF]) || 0,
+        iDisc !== -1 && Number(data[i][iDisc]) > 0));
       part.statuses.push(iSt === -1 ? 'M' : (statusCode(data[i][iSt]) || 'M'));
       if (!lines[key].phone && c.phone) lines[key].phone = c.phone;
     }
@@ -1707,7 +1744,7 @@ function refreshCollections(monthsBack) {
     if (!paid) f.owed += part.amount;
     f.lines.push({ family: L.family, month: L.month, monthDate: L.monthDate, clinic: L.clinic,
                    players: part.players, raws: part.raws, amount: part.amount, paid: paid,
-                   statuses: part.statuses });
+                   statuses: part.statuses, details: part.details });
   }
 
   // --- Order: biggest balance first; each family's months oldest first ----
@@ -1743,7 +1780,7 @@ function refreshCollections(monthsBack) {
     .setFontWeight('bold').setBackground('#021f3d').setFontColor('white')
     .setFontSize(10).setVerticalAlignment('middle');
   sheet.setRowHeight(1, 28);
-  [230, 115, 80, 120, 210, 75, 85, 45, 115, 95, 280, 80]
+  [230, 115, 80, 120, 300, 75, 85, 45, 115, 95, 280, 80]
     .forEach((w, i) => sheet.setColumnWidth(i + 1, w));
   sheet.setFrozenRows(1);
   sheet.setFrozenColumns(1);          // the family name stays put when scrolling right
@@ -1778,7 +1815,7 @@ function refreshCollections(monthsBack) {
     famRows.push({ row: out.length + 1, owing: isOwing, escalate: isOwing && isEscalated,
                    noPhone: !phone });
     for (const l of f.lines) {
-      out.push(['', '', shortMonthLabel(l.month), l.clinic, l.players.join(', '),
+      out.push(['', '', shortMonthLabel(l.month), l.clinic, l.details.join('\n'),
                 statusCellLabel(l.statuses), l.amount, l.paid, '', '', '', monthRowKey(l)]);
       monthRows.push({ row: out.length + 1, clinic: l.clinic, paid: l.paid });
     }
@@ -1809,6 +1846,7 @@ function refreshCollections(monthsBack) {
   if (out.length > 0) {
     sheet.getRange(2, 1, out.length, W - 1)
       .setFontSize(10).setFontColor('#5f6368').setVerticalAlignment('middle');
+    sheet.getRange(2, COLL_COL.players, out.length, 1).setWrap(true);   // one kid per line
   }
   famRows.forEach(d => {
     sheet.getRange(d.row, 1, 1, W - 1)
@@ -1972,7 +2010,7 @@ function onCollectionsEdit(e) {
     if (touches(pCol) && kCol) syncCollectionsPaid(sheet, start, n, pCol, kCol);
     if (touches(sCol) && kCol && pCol && wCol) {
       changeCollectionsStatus(sheet, start, n,
-        { status: sCol, paid: pCol, key: kCol, owed: wCol }, e);
+        { status: sCol, paid: pCol, key: kCol, owed: wCol, players: h.indexOf('Players') + 1 }, e);
     }
     const phCol = h.indexOf('Phone') + 1;
     if (touches(phCol) && kCol) keepCollectionsPhone(sheet, start, n, { phone: phCol, key: kCol }, e);
@@ -2119,14 +2157,16 @@ function readBillingPlayers(billing, tabName) {
   const data = tab.getDataRange().getValues();
   const h = data[0];
   const iSt = h.indexOf('Status'), iF = h.indexOf('Final Charge'),
-        iC = h.indexOf('Charged?'), iS = h.indexOf('Sessions');
+        iC = h.indexOf('Charged?'), iS = h.indexOf('Sessions'), iDisc = h.indexOf('Sibling Discount');
   const out = {};
   for (let i = 1; i < data.length; i++) {
     if (iS !== -1 && typeof data[i][iS] !== 'number') continue;   // summary rows
     const name = (data[i][0] || '').toString().trim();
     if (!name) continue;
     out[name.toLowerCase()] = { name: name, code: statusCode(data[i][iSt]) || 'M',
-      amount: Number(data[i][iF]) || 0, charged: iC !== -1 && data[i][iC] === true };
+      amount: Number(data[i][iF]) || 0, charged: iC !== -1 && data[i][iC] === true,
+      sessions: iS !== -1 ? data[i][iS] : 0,
+      discounted: iDisc !== -1 && Number(data[i][iDisc]) > 0 };
   }
   return out;
 }
@@ -2189,6 +2229,7 @@ function changeCollectionsStatus(sheet, start, n, cols, e) {
       cell.setNote((d.getMonth() + 1) + '/' + d.getDate() + ': ' + r.oldLabel + ' -> ' +
         statusLabel(code) + ', $' + r.oldAmt.toFixed(2) + ' -> $' + r.newAmt.toFixed(2) + '.' + r.warn);
       sheet.getRange(row, cols.owed).setValue(r.newAmt);
+      if (cols.players && r.details) sheet.getRange(row, cols.players).setValue(r.details.join('\n'));
       changedRows.push(row);
     }
     if (changedRows.length) updateCollectionsFamilyTotals(sheet, changedRows);
@@ -2249,6 +2290,12 @@ function applyStatusChange(billing, k, code, who) {
   const amounts = k.raws.map(r => (after[r.toLowerCase()] || {}).amount || 0);
   log.getRange(first, 7, rows.length, 1).setValues(amounts.map(a => [a]));
   const newAmt = amounts.reduce((s, a) => s + a, 0);
+  // The Collections line spells out each kid's clinics and price - keep it
+  // in step with the bill that was just rebuilt.
+  const details = k.raws.map(r => {
+    const a = after[r.toLowerCase()];
+    return a ? playerDetailLine(playerFullName(a.name), a.sessions, a.amount, a.discounted) : playerFullName(r);
+  });
 
   // 3. Fix the roster so the app shows the right badge from now on.
   let warn = '';
@@ -2271,7 +2318,8 @@ function applyStatusChange(billing, k, code, who) {
     warn += ' Heads up: the sibling discount changed for ' + moved.join(', ') +
       ', who was already charged - check Jonas.';
   }
-  return { unchanged: false, oldLabel: oldLabel, oldAmt: oldAmt, newAmt: newAmt, warn: warn };
+  return { unchanged: false, oldLabel: oldLabel, oldAmt: oldAmt, newAmt: newAmt, warn: warn,
+           details: details };
 }
 
 // Sets a kid's status on every clinic roster tab they appear on - membership
