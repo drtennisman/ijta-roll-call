@@ -398,9 +398,11 @@ function parseDate(dateVal) {
 //
 // A family never pays more or less over it: the moved Wednesday is priced as
 // part of the month it happened in - free if it would have been their free
-// clinic there, the normal session price if not (see buildClinicBillingRows).
-// It just shows up on the next month's bill. The Month-End Wednesday report
-// lists each kid's charge for it (generateWednesdayReport).
+// clinic there, the normal session price if not (movedSessionCharge). It is
+// charged from the Month-End Wednesday report (generateWednesdayReport),
+// which has its own Charged? boxes, and is deliberately LEFT OFF the next
+// month's bills so nobody is charged twice. The summaries count it in the
+// next month (sessions, coaches, revenue) so profit still lines up.
 // ============================================================
 
 function isWednesdayMonthEnd(d) {
@@ -1237,7 +1239,15 @@ function generateMonthlyBilling(monthOverride, yearOverride, onlyClinic) {
   // A clinic meets at most once per day, so each kid counts at most one
   // session per clinic per day - neutralizes any duplicate rows.
   const seenSession = {};
+  const movedWednesday = {};   // clinic -> kids who came last month's final Wednesday
   for (const row of attendanceRows) {
+    // Last month's final Wednesday (see the Wednesday month-end rule) is NOT on
+    // this month's bills: it is charged from the Month-End Wednesday report,
+    // which has its own Charged? boxes. On both, families would pay twice.
+    if (row.moved) {
+      movedWednesday[row.clinic] = (movedWednesday[row.clinic] || 0) + 1;
+      continue;
+    }
     const dayKey = row.clinic + '|||' + row.playerName.toString().trim().toLowerCase() + '|||' +
       (row.date.getMonth() + 1) + '/' + row.date.getDate() + '/' + row.date.getFullYear();
     if (seenSession[dayKey]) continue;
@@ -1246,18 +1256,15 @@ function generateMonthlyBilling(monthOverride, yearOverride, onlyClinic) {
     if (!clinicData[row.clinic]) clinicData[row.clinic] = {};
     const cd = clinicData[row.clinic];
     if (!cd[row.playerName]) {
-      cd[row.playerName] = { name: row.playerName, status: row.status, sessions: 0, movedIn: 0 };
+      cd[row.playerName] = { name: row.playerName, status: row.status, sessions: 0 };
     }
     cd[row.playerName].sessions++;
-    if (row.moved) cd[row.playerName].movedIn++;       // last month's final Wednesday
   }
 
-  const prevBilled = previousMonthBilled(billingMonth, billingYear);
   for (const clinic in clinicData) {
     for (const key in clinicData[clinic]) {
       const p = clinicData[clinic][key];
       p.status = resolvePlayerStatus(statusOverrides, clinic, p.name, p.status);
-      markMovedIn(p, clinic, p.movedIn, prevBilled);
     }
   }
 
@@ -1375,6 +1382,13 @@ function generateMonthlyBilling(monthOverride, yearOverride, onlyClinic) {
     sheet.getRange(summaryStartRow + 4, 2).setValue(billing.net);
     sheet.getRange(summaryStartRow + 4, 2).setNumberFormat('$#,##0.00');
     sheet.getRange(summaryStartRow + 4, 1, 1, 2).setFontWeight('bold');
+    if (movedWednesday[clinic]) {
+      const prevLast = new Date(billingYear, billingMonth - 1, 0);
+      const lbl = (prevLast.getMonth() + 1) + '/' + prevLast.getDate() + '/' + prevLast.getFullYear();
+      sheet.getRange(summaryStartRow + 6, 1).setValue('Not on this tab: Wed ' + lbl +
+        ' is charged from the "Month-End Wednesday - ' + MONTH_NAMES_FULL[prevLast.getMonth()] + ' ' +
+        prevLast.getFullYear() + '" report.');
+    }
 
     Logger.log('Billing report generated for ' + clinic + ': ' + billingRows.length +
       ' players, gross $' + billing.gross + ', discounts $' + billing.totalDiscount +
@@ -1383,10 +1397,13 @@ function generateMonthlyBilling(monthOverride, yearOverride, onlyClinic) {
 }
 
 // ---- Month-End Wednesday report ------------------------------------------
-// For a month that ended on a Wednesday (month 1-12): one tab listing every
-// kid who came that Wednesday, what it costs them and why. The same charge
-// is on the next month's bills (see buildClinicBillingRows), so this is the
-// explanation, not a second list to charge from. Returns the tab name.
+// For a month that ended on a Wednesday (month 1-12): the CHARGE LIST for that
+// day. One row per kid who came, what it costs them and why, with Charged? and
+// Charged On boxes that work like a billing tab's. It is not on the next
+// month's bills (generateMonthlyBilling leaves it off), so this is the only
+// place it is charged from. Priced as part of the month it happened in: what
+// it adds to the kid's count there, so $0 when it is their free clinic.
+// Charged? ticks survive running the report again. Returns a summary.
 function generateWednesdayReport(month, year) {
   const lastDay = new Date(year, month, 0);
   const label = (lastDay.getMonth() + 1) + '/' + lastDay.getDate() + '/' + lastDay.getFullYear();
@@ -1396,19 +1413,19 @@ function generateWednesdayReport(month, year) {
   const next = new Date(year, month, 1);
   const nm = next.getMonth() + 1, ny = next.getFullYear();
   const monthName = MONTH_NAMES_FULL[month - 1] + ' ' + year;
-  const nextName = MONTH_NAMES_FULL[nm - 1] + ' ' + ny;
+  const short = monthName.split(' ')[0];
 
-  // Who came that Wednesday - read exactly the way the next month's billing
-  // reads it, one per kid per clinic
+  // Who came that Wednesday, one per kid per clinic, with how they checked in
   const seen = {}, kids = [];
   for (const r of getAttendanceForMonth(nm, ny)) {
     if (!r.moved) continue;
     const k = r.clinic + '|||' + String(r.playerName).trim().toLowerCase();
     if (seen[k]) continue;
     seen[k] = true;
-    kids.push({ clinic: String(r.clinic).trim(), name: String(r.playerName).trim() });
+    kids.push({ clinic: String(r.clinic).trim(), name: String(r.playerName).trim(), status: r.status });
   }
 
+  const overrides = getStatusOverrides(monthName);
   const prevBilled = previousMonthBilled(nm, ny) || {};
   const billing = SpreadsheetApp.openById(BILLING_SHEET_ID);
   const monthCharges = {};                   // what each kid was billed that month, per clinic
@@ -1428,47 +1445,87 @@ function generateWednesdayReport(month, year) {
 
   const rank = (c) => { const i = CLINIC_DISPLAY_ORDER.indexOf(c); return i === -1 ? 99 : i; };
   kids.sort((a, b) => (rank(a.clinic) - rank(b.clinic)) || a.name.localeCompare(b.name));
-  const rows = kids.map(kid => {
-    const prev = prevBilled[kid.clinic + '|||' + kid.name.toLowerCase()] || { sessions: 0, status: 'M' };
-    const charge = movedSessionCharge(kid.clinic, prev.status, prev.sessions, 1);
+  const priced = kids.map(kid => {
+    const key = kid.clinic + '|||' + kid.name.toLowerCase();
+    const prev = prevBilled[key];
+    // A kid with sessions that month is priced at the status they were billed
+    // at. One who came ONLY that Wednesday has no bill to take it from, so it
+    // is the status they checked in with - not Member by default.
+    const status = prev ? prev.status : resolvePlayerStatus(overrides, kid.clinic, kid.name.toLowerCase(), kid.status);
+    const sessions = prev ? prev.sessions : 0;
+    const charge = movedSessionCharge(kid.clinic, status, sessions, 1);
     const billed = chargesFor(kid.clinic)[kid.name.toLowerCase()];
-    return [kid.name, kid.clinic, statusLabel(prev.status), prev.sessions, prev.sessions + 1,
-            charge === 0 ? 'YES' : 'No', charge, typeof billed === 'number' ? billed : 'not billed yet'];
+    return { key: key, name: kid.name, clinic: kid.clinic, status: status, sessions: sessions,
+             charge: charge, billed: typeof billed === 'number' ? billed : 'not billed yet' };
   });
+  // Bruno is not ours to collect (see COLLECTIONS_SKIP_CLINICS): kept off the
+  // list and the total, noted at the bottom.
+  const ours = priced.filter(p => !collectionsSkips(p.clinic));
+  const notOurs = priced.filter(p => collectionsSkips(p.clinic));
 
+  // Charged? ticks and dates from the report as it stood, so running it again
+  // never loses who has been charged.
   const tabName = 'Month-End Wednesday - ' + monthName;
+  const prevTicks = {};
   let sheet = billing.getSheetByName(tabName);
-  if (sheet) billing.deleteSheet(sheet);
+  if (sheet) {
+    const d = sheet.getDataRange().getValues();
+    const h = d.length ? d[0] : [];
+    const iC = h.indexOf('Charged?'), iD = h.indexOf('Charged On'), iK = h.indexOf('Clinic');
+    for (let i = 1; i < d.length; i++) {
+      const name = (d[i][0] || '').toString().trim().toLowerCase();
+      const clinic = iK !== -1 ? (d[i][iK] || '').toString().trim() : '';
+      if (!name || !clinic || iC === -1 || d[i][iC] !== true) continue;
+      prevTicks[clinic + '|||' + name] = iD !== -1 ? d[i][iD] : '';
+    }
+    billing.deleteSheet(sheet);
+  }
   sheet = billing.insertSheet(tabName);
-  const headers = ['Player', 'Clinic', 'Status', monthName.split(' ')[0] + ' sessions',
-    label + ' is session #', 'Free clinic?', 'Charge for ' + label, monthName.split(' ')[0] + ' bill'];
+
+  const headers = ['Player', 'Clinic', 'Status', short + ' sessions', label + ' is session #',
+    'Free clinic?', 'Charge for ' + label, 'Charged?', 'Charged On', short + ' bill'];
   const W = headers.length;
-  sheet.getRange(1, 1).setValue('Wed ' + label + ' is billed on the ' + nextName + ' bills, priced as part of ' +
-    monthName + ': free if it would have been that month\'s free clinic. These charges are already on the ' +
-    nextName + ' billing tabs.');
-  sheet.getRange(1, 1, 1, W).merge().setWrap(true).setFontWeight('bold').setFontColor('#021f3d')
-    .setBackground('#eef1f7').setVerticalAlignment('middle');
-  sheet.setRowHeight(1, 44);
-  sheet.getRange(3, 1, 1, W).setValues([headers])
-    .setFontWeight('bold').setBackground('#021f3d').setFontColor('white');
-  if (rows.length) {
-    sheet.getRange(4, 1, rows.length, W).setValues(rows);
-    sheet.getRange(4, 7, rows.length, 2).setNumberFormat('$#,##0.00');
-    rows.forEach((r, i) => {
-      if (r[5] === 'YES') sheet.getRange(4 + i, 6).setFontColor('#2e7d32').setFontWeight('bold');
+  sheet.getRange(1, 1, 1, W).setValues([headers])
+    .setFontWeight('bold').setBackground('#2e7d32').setFontColor('white');
+  const n = ours.length;
+  if (n) {
+    const COL_CHARGE = 7, COL_TICK = 8, COL_ON = 9, COL_BILL = 10;
+    sheet.getRange(2, COL_ON, n, 1).setNumberFormat('M/d/yyyy');
+    sheet.getRange(2, COL_CHARGE, n, 1).setNumberFormat('$#,##0.00');
+    sheet.getRange(2, COL_BILL, n, 1).setNumberFormat('$#,##0.00');
+    // insertCheckboxes() resets every cell it touches to FALSE, so the ticks
+    // are written back AFTER it, along with everything else.
+    sheet.getRange(2, COL_TICK, n, 1).insertCheckboxes();
+    sheet.getRange(2, 1, n, W).setValues(ours.map(p => {
+      const ticked = Object.prototype.hasOwnProperty.call(prevTicks, p.key);
+      return [p.name, p.clinic, statusLabel(p.status), p.sessions, p.sessions + 1,
+              p.charge === 0 ? 'YES' : 'No', p.charge, ticked, ticked ? (prevTicks[p.key] || new Date()) : '', p.billed];
+    }));
+    ours.forEach((p, i) => {
+      if (p.charge === 0) sheet.getRange(2 + i, 6).setFontColor('#2e7d32').setFontWeight('bold');
     });
   }
-  const free = rows.filter(r => r[5] === 'YES').length;
-  const total = rows.reduce((s, r) => s + r[6], 0);
-  const sum = 5 + rows.length;
-  sheet.getRange(sum, 1, 3, 2).setValues([
-    ['Kids that day:', rows.length], ['Free clinics kept:', free], ['Total charged for ' + label + ':', total]]);
-  sheet.getRange(sum + 2, 2).setNumberFormat('$#,##0.00');
-  sheet.getRange(sum, 1, 3, 1).setFontWeight('bold');
-  [200, 130, 80, 120, 140, 100, 140, 120].forEach((w, i) => sheet.setColumnWidth(i + 1, w));
-  sheet.setFrozenRows(3);
-  Logger.log(tabName + ': ' + rows.length + ' kids, ' + free + ' free, $' + total.toFixed(2));
-  return { tab: tabName, kids: rows.length, free: free, total: total, label: label, nextName: nextName };
+  const free = ours.filter(p => p.charge === 0).length;
+  const total = ours.reduce((s, p) => s + p.charge, 0);
+  const sum = n + 3;
+  const lines = [['SUMMARY', ''], ['Kids to charge:', n], ['Free clinics kept:', free],
+                 ['Total to charge for ' + label + ':', total]];
+  sheet.getRange(sum, 1, lines.length, 2).setValues(lines);
+  sheet.getRange(sum, 1, lines.length, 1).setFontWeight('bold');
+  sheet.getRange(sum + 3, 2).setNumberFormat('$#,##0.00');
+  let note = sum + lines.length + 1;
+  sheet.getRange(note++, 1).setValue('Wed ' + label + ' is charged from this report, not on ' +
+    MONTH_NAMES_FULL[nm - 1] + '\u0027s bills. Each charge is priced as part of ' + monthName +
+    ': free if it would have been that month\u0027s free clinic.');
+  if (notOurs.length) {
+    sheet.getRange(note++, 1).setValue('Not on this list: ' + notOurs.length + ' Bruno kid' +
+      (notOurs.length !== 1 ? 's' : '') + ' came that day (not collected by IJTA).');
+  }
+  [200, 130, 80, 120, 140, 100, 150, 80, 110, 110].forEach((w, i) => sheet.setColumnWidth(i + 1, w));
+  sheet.setFrozenRows(1);
+  Logger.log(tabName + ': ' + n + ' kids, ' + free + ' free, $' + total.toFixed(2));
+  return { tab: tabName, kids: n, free: free, total: total, label: label, nextName: MONTH_NAMES_FULL[nm - 1],
+           notOurs: notOurs.length };
 }
 
 // Menu: the report for the month that just ended on a Wednesday - this month
@@ -1489,9 +1546,11 @@ function menuWednesdayReport() {
   }
   const r = generateWednesdayReport(target.getMonth() + 1, target.getFullYear());
   ui.alert('"' + r.tab + '" is ready on the billing sheet.\n\n' +
-    r.kids + ' kid' + (r.kids !== 1 ? 's' : '') + ' came on ' + r.label + '. ' +
-    r.free + ' of them keep their free clinic. $' + r.total.toFixed(2) + ' in all, already on the ' +
-    r.nextName + ' bills.');
+    r.kids + ' kid' + (r.kids !== 1 ? 's' : '') + ' to charge for ' + r.label + ', ' +
+    r.free + ' of them free clinics: $' + r.total.toFixed(2) + ' in all.\n\n' +
+    'Charge from that tab and tick Charged? as you go. These are NOT on ' + r.nextName +
+    '\'s bills, so nobody is charged twice.' +
+    (r.notOurs ? '\n\n(' + r.notOurs + ' Bruno kid' + (r.notOurs !== 1 ? 's' : '') + ' left off: not collected by IJTA.)' : ''));
 }
 
 // ---- The Note column on a billing tab --------------------------------------
@@ -2468,7 +2527,8 @@ function getBillingReminderRecipients() {
 function onBillingEdit(e) {
   try {
     const sheet = e.range.getSheet();
-    if (sheet.getName().indexOf(' - Billing - ') === -1) return;
+    const tabName = sheet.getName();
+    if (tabName.indexOf(' - Billing - ') === -1 && tabName.indexOf('Month-End Wednesday - ') !== 0) return;
     const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
     const chargedCol = headers.indexOf('Charged?') + 1;
     const chargedOnCol = headers.indexOf('Charged On') + 1;
