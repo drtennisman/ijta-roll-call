@@ -1705,6 +1705,68 @@ function parseCollectionsRowKey(v) {
   return null;
 }
 
+// ---- Renaming a family on the Collections sheet -----------------------------
+// Lisa can type a different name over a family line ("MCCAIN FAMILY" ->
+// "Jeff Liles", the member who is actually charged). It is kept on a small
+// "Renames" tab in this spreadsheet and applied on every refresh, so it holds
+// in months when that family owes nothing too. Only the Collections sheet is
+// affected: the Contacts list and the billing tabs are never touched. A
+// renamed family joins any family already called the new name.
+const RENAMES_TAB = 'Renames';
+const RENAMES_HEADERS = ['Family as the sheet knows it', 'Shown as'];
+
+// The sheet holding the list. Looked up by name so a tab added later can
+// never take its place.
+function collectionsMainSheet(cs) {
+  return cs.getSheetByName('Collections') || cs.getSheets()[0];
+}
+
+// { 'mccain (no contact)': 'Jeff Liles' }
+function loadRenames(cs) {
+  const map = {};
+  const tab = cs.getSheetByName(RENAMES_TAB);
+  if (!tab || tab.getLastRow() < 2) return map;
+  const data = tab.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    const from = (data[i][0] || '').toString().trim(), to = (data[i][1] || '').toString().trim();
+    if (from && to && from.toLowerCase() !== to.toLowerCase()) map[from.toLowerCase()] = to;
+  }
+  return map;
+}
+
+// The name a family is finally shown under: a renamed family that was renamed
+// again follows through, with a guard so two names pointing at each other
+// cannot loop.
+function resolveFamilyName(name, renames) {
+  let cur = name;
+  for (let i = 0; i < 6; i++) {
+    const to = renames[cur.toLowerCase()];
+    if (!to) return cur;
+    cur = to;
+  }
+  return name;
+}
+
+// Several histories (one per name a block goes by) as one: the furthest-along
+// outreach with its date, every distinct note once, the first typed phone.
+function mergeHistory(list) {
+  const uniq = [];
+  list.forEach(h => { if (h && Object.keys(h).length && uniq.indexOf(h) === -1) uniq.push(h); });
+  if (uniq.length === 0) return {};
+  if (uniq.length === 1) return uniq[0];
+  const out = { outreach: '', last: '', notes: '', phone: '' }, notes = [];
+  uniq.forEach(h => {
+    if (h.outreach && (!out.outreach ||
+        OUTREACH_LEVELS.indexOf(h.outreach) > OUTREACH_LEVELS.indexOf(out.outreach))) {
+      out.outreach = h.outreach; out.last = h.last;
+    }
+    (h.notes || '').split('; ').forEach(n => { n = n.trim(); if (n && notes.indexOf(n) === -1) notes.push(n); });
+    if (!out.phone && h.phone) out.phone = h.phone;
+  });
+  out.notes = notes.join('; ');
+  return out;
+}
+
 // Rebuilds the Collections sheet from the billing tabs. The billing sheet is
 // the truth for who has been charged; the sheet is rewritten each time so it
 // stays sorted, but Outreach / Last Contact / Notes are carried across by
@@ -1774,9 +1836,10 @@ function refreshCollections(monthsBack) {
 
   // --- Preserve whatever the shop manager typed last time -----------------
   const cs = SpreadsheetApp.openById(COLLECTIONS_SHEET_ID);
-  const sheet = cs.getSheets()[0];
+  const sheet = collectionsMainSheet(cs);
   const kept = readCollectionsNotes(sheet);
   const history = (family) => kept.families[family.toLowerCase()] || {};
+  const renames = loadRenames(cs);     // families Lisa has renamed on this sheet
 
   // --- Group months under families ----------------------------------------
   const fams = {};
@@ -1799,14 +1862,21 @@ function refreshCollections(monthsBack) {
       if (!prev) continue;
       // A paid month stays for one refresh so the tick is visible, and for as
       // long as the family has outreach or notes on file. Otherwise it retires.
-      const hist = history(L.family);
+      const eff0 = resolveFamilyName(L.family, renames);
+      const hist = mergeHistory([history(eff0), history(L.family)]);
       if (prev.paid && !hist.outreach && !hist.notes) continue;
     }
     if (prev) carried++; else added++;
     const part = paid ? L.done : L.open;
-    const fk = L.family.toLowerCase();
-    if (!fams[fk]) fams[fk] = { family: L.family, phone: '', owed: 0, lines: [] };
+    // A family Lisa renamed on this sheet is shown, and grouped, under the new
+    // name - so it joins any family already called that. The line itself keeps
+    // its real family in its key: that is what a Paid tick or a Status change
+    // goes by.
+    const eff = resolveFamilyName(L.family, renames);
+    const fk = eff.toLowerCase();
+    if (!fams[fk]) fams[fk] = { family: eff, origins: {}, phone: '', owed: 0, lines: [] };
     const f = fams[fk];
+    f.origins[L.family.toLowerCase()] = L.family;
     if (!f.phone && L.phone) f.phone = L.phone;
     if (!paid) f.owed += part.amount;
     f.lines.push({ family: L.family, month: L.month, monthDate: L.monthDate, clinic: L.clinic,
@@ -1847,6 +1917,12 @@ function refreshCollections(monthsBack) {
     .setFontWeight('bold').setBackground('#021f3d').setFontColor('white')
     .setFontSize(10).setVerticalAlignment('middle');
   sheet.setRowHeight(1, 28);
+  // Two cells on a family line can be typed over, and stay from then on.
+  sheet.getRange(1, COLL_COL.family).setNote('Type a different name over a family line to rename it ' +
+    '(for example the member who is charged). It stays on every refresh and joins any family already ' +
+    'called that. Clear the cell to undo.');
+  sheet.getRange(1, COLL_COL.phone).setNote('Type a phone number on a family line to keep it for that ' +
+    'family. Clear the cell to go back to the number on file.');
   [230, 115, 80, 120, 300, 75, 85, 45, 115, 95, 280, 80]
     .forEach((w, i) => sheet.setColumnWidth(i + 1, w));
   sheet.setFrozenRows(1);
@@ -1860,7 +1936,10 @@ function refreshCollections(monthsBack) {
   let owedTotal = 0, owing = 0, escalate = 0, notContacted = 0, noPhone = 0;
 
   for (const f of famList) {
-    const hist = history(f.family);
+    // Outreach, notes and a typed phone are kept under the name shown; a family
+    // that was renamed also brings along whatever it had under its own name.
+    const hist = mergeHistory([history(f.family)].concat(
+      Object.keys(f.origins).map(k => history(f.origins[k]))));
     const isOwing = cents(f.owed) > 0;
     const isEscalated = OUTREACH_ESCALATE.indexOf(hist.outreach || '') !== -1;
     // A number typed on this sheet beats the one on file.
@@ -2081,7 +2160,106 @@ function onCollectionsEdit(e) {
     }
     const phCol = h.indexOf('Phone') + 1;
     if (touches(phCol) && kCol) keepCollectionsPhone(sheet, start, n, { phone: phCol, key: kCol }, e);
+    const fCol = h.indexOf('Family') + 1;
+    if (touches(fCol) && kCol) keepCollectionsName(sheet, start, n, { family: fCol, key: kCol }, e);
   } catch (err) { /* never break an edit */ }
+}
+
+// The Renames tab, created the first time it is needed. Added at the END so it
+// can never become the first tab.
+function renamesTab(cs) {
+  let tab = cs.getSheetByName(RENAMES_TAB);
+  if (!tab) {
+    tab = cs.insertSheet(RENAMES_TAB, cs.getSheets().length);
+    tab.getRange(1, 1, 1, 2).setValues([RENAMES_HEADERS])
+      .setFontWeight('bold').setBackground('#021f3d').setFontColor('white');
+    tab.getRange(1, 1).setNote('Each row is a family Lisa renamed on the Collections sheet. ' +
+      'Delete a row to undo that rename.');
+    tab.setColumnWidth(1, 260); tab.setColumnWidth(2, 220);
+    tab.setFrozenRows(1);
+  }
+  return tab;
+}
+
+// Points every family shown as `shown` - and `shown` itself - at `newName`.
+function saveRename(tab, shown, newName) {
+  const lc = (s) => (s || '').toString().trim().toLowerCase();
+  const data = tab.getLastRow() >= 2 ? tab.getRange(2, 1, tab.getLastRow() - 1, 2).getValues() : [];
+  let ownRow = -1;
+  data.forEach((r, i) => {
+    if (lc(r[1]) === lc(shown)) tab.getRange(i + 2, 2).setValue(newName);   // already renamed into this block
+    if (lc(r[0]) === lc(shown)) ownRow = i + 2;
+  });
+  if (ownRow !== -1) tab.getRange(ownRow, 2).setValue(newName);
+  else if (lc(shown) !== lc(newName)) tab.getRange(tab.getLastRow() + 1, 1, 1, 2).setValues([[shown, newName]]);
+  // a family renamed to itself is no rename at all
+  const after = tab.getLastRow() >= 2 ? tab.getRange(2, 1, tab.getLastRow() - 1, 2).getValues() : [];
+  for (let i = after.length - 1; i >= 0; i--) {
+    if (lc(after[i][0]) === lc(after[i][1])) tab.deleteRows(i + 2, 1);
+  }
+}
+
+// Undoes every rename that points at `shown`. Returns how many it removed.
+function removeRenamesInto(tab, shown) {
+  if (tab.getLastRow() < 2) return 0;
+  const data = tab.getRange(2, 1, tab.getLastRow() - 1, 2).getValues();
+  let n = 0;
+  for (let i = data.length - 1; i >= 0; i--) {
+    if ((data[i][1] || '').toString().trim().toLowerCase() === shown.toLowerCase()) { tab.deleteRows(i + 2, 1); n++; }
+  }
+  return n;
+}
+
+// ---- A name typed over a family line ---------------------------------------
+// Saved on the Renames tab and shown on every refresh from then on, joining any
+// family already called that. The family line's own key moves to the new name
+// with it, so the outreach and notes already on that line come along. Clearing
+// the cell undoes the rename. Collections only: Contacts and billing are not
+// touched.
+function keepCollectionsName(sheet, start, n, cols, e) {
+  const keys = sheet.getRange(start, cols.key, n, 1).getValues();
+  const vals = sheet.getRange(start, cols.family, n, 1).getValues();
+  let cs = null, tab = null;
+  for (let i = 0; i < n; i++) {
+    const row = start + i;
+    if (row === 1) continue;
+    const k = parseCollectionsRowKey(keys[i][0]);
+    if (!k) continue;
+    const cell = sheet.getRange(row, cols.family);
+    if (k.type !== 'F') {                                     // month lines have no name
+      cell.setValue('');
+      cell.setNote('Type the name on the family line above.');
+      continue;
+    }
+    const shown = familyDisplayName(k.family);
+    const typed = (vals[i][0] || '').toString().replace(/\|\|\|/g, ' ').replace(/\s+/g, ' ').trim();
+    if (typed.toUpperCase() === shown.toUpperCase()) continue;   // nothing changed
+    try {
+      if (!cs) { cs = SpreadsheetApp.openById(COLLECTIONS_SHEET_ID); tab = renamesTab(cs); }
+      if (!typed) {                                           // cleared: undo
+        const undone = removeRenamesInto(tab, k.family);
+        cell.setValue(shown);
+        cell.setNote(undone
+          ? 'Rename undone. ' + undone + ' famil' + (undone !== 1 ? 'ies go' : 'y goes') +
+            ' back to ' + (undone !== 1 ? 'their own names' : 'its own name') + ' on the next refresh.'
+          : 'Nothing to undo - this family has its own name. To rename it, type the new name here.');
+        continue;
+      }
+      if (!/[A-Za-z]/.test(typed) || typed.length > 60) {
+        cell.setValue(shown);
+        cell.setNote('"' + typed + '" does not look like a name - nothing was changed.');
+        continue;
+      }
+      saveRename(tab, k.family, typed);
+      sheet.getRange(row, cols.key).setValue(familyRowKey(typed, k.phone));
+      cell.setValue(familyDisplayName(typed));
+      cell.setNote('Renamed from ' + shown + '. Every month for this family shows under this name from now on. ' +
+        'If a family is already called this, they join on the next refresh. Clear this cell to undo.');
+    } catch (err) {
+      cell.setValue(shown);
+      cell.setNote('Could not save the new name (' + err.message + '). Nothing was changed.');
+    }
+  }
 }
 
 // ---- A phone number typed on a family line ---------------------------------
